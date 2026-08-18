@@ -13,7 +13,7 @@
 
 import * as THREE from 'three';
 import { clamp, damp, smoothstep } from '../core/math';
-import { ARENA_HALF, CEILING_HEIGHT } from '../sim/arena';
+import { ARENA_HALF, CEILING_HEIGHT, WALL_HEIGHT } from '../sim/arena';
 import type { Vec3 } from '../sim/physics';
 
 export type CameraMode = 'broadcast' | 'chase' | 'orbit' | 'intro-red' | 'intro-blue' | 'garage';
@@ -139,17 +139,20 @@ export class CameraDirector {
     if (side.z < 0) side.negate();
 
     // Back off as they separate so both stay in shot.
-    const distance = clamp(4.6 + separation * 0.95, 5.2, 12.5);
-    const height = clamp(2.3 + separation * 0.28, 2.3, 5.4);
+    const distance = clamp(5.0 + separation * 0.9, 5.5, 12);
+    // Always above the top of the cage wall. A camera below that line ends up
+    // looking through the wall posts, and at close range one of them can fill
+    // the whole frame; from above the rail the view is always clear.
+    const height = clamp(WALL_HEIGHT + 0.35 + separation * 0.3, WALL_HEIGHT + 0.35, 6);
 
     this.desiredPosition.copy(mid).addScaledVector(side, distance);
     this.desiredPosition.y = height;
 
-    // Keep the camera inside the hall.
-    const limit = ARENA_HALF + 3.2;
+    // Keep it inside the hall.
+    const limit = ARENA_HALF + 3.5;
     this.desiredPosition.x = clamp(this.desiredPosition.x, -limit, limit);
     this.desiredPosition.z = clamp(this.desiredPosition.z, -limit, limit);
-    this.desiredPosition.y = clamp(this.desiredPosition.y, 1.5, CEILING_HEIGHT + 2.5);
+    this.desiredPosition.y = clamp(this.desiredPosition.y, WALL_HEIGHT + 0.2, CEILING_HEIGHT + 1.5);
 
     this.desiredLookAt.copy(mid);
     this.desiredLookAt.y = 0.35 + smoothstep(0, 8, separation) * 0.4;
@@ -166,21 +169,26 @@ export class CameraDirector {
   }
 
   private orbitCage(angle: number, heightFactor: number): void {
-    const radius = ARENA_HALF + 4.5;
+    const radius = ARENA_HALF + 5.5;
+    // High enough that the sight line to the middle of the arena passes over
+    // the near wall. Any lower and the top rail cuts straight across the shot.
     this.desiredPosition.set(
       Math.cos(angle) * radius,
-      3.2 + Math.sin(angle * 0.7) * 1.4 * heightFactor,
+      5.0 + Math.sin(angle * 0.7) * 1.2 * heightFactor,
       Math.sin(angle) * radius,
     );
-    this.desiredLookAt.set(0, 0.7, 0);
+    this.desiredLookAt.set(0, 0.5, 0);
   }
 
   private holdOn(target: THREE.Vector3, angle: number): void {
-    const radius = 3.4;
+    // A close hold on one robot, kept inside the cage — the starting squares are
+    // near the walls, so an unclamped orbit around one would end up outside.
+    const radius = 3;
+    const limit = ARENA_HALF - 1;
     this.desiredPosition.set(
-      target.x + Math.cos(angle) * radius,
-      target.y + 1.35,
-      target.z + Math.sin(angle) * radius,
+      clamp(target.x + Math.cos(angle) * radius, -limit, limit),
+      target.y + 1.2,
+      clamp(target.z + Math.sin(angle) * radius, -limit, limit),
     );
     this.desiredLookAt.copy(target);
     this.desiredLookAt.y += 0.18;
