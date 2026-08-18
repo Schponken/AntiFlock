@@ -157,6 +157,7 @@ export class Fight {
         if (live) {
           this.applyPulverisers(dt);
           this.accumulateScores(dt);
+          this.reportSelfRights();
         }
       },
     });
@@ -499,6 +500,20 @@ export class Fight {
   // -------------------------------------------------------------------------
   // Scoring
   // -------------------------------------------------------------------------
+
+  /** Raise an event on the step a robot fires its self-righting arm. */
+  private reportSelfRights(): void {
+    for (const bot of [this.red, this.blue]) {
+      if (!bot.justSelfRighted) continue;
+      this.raise({
+        kind: 'self-right',
+        side: bot.side,
+        point: { x: bot.position.x, y: bot.position.y + bot.hullCenterY, z: bot.position.z },
+        energyJ: 0,
+        intensity: 0.4,
+      });
+    }
+  }
 
   private accumulateScores(dt: number): void {
     const gap = sub(this.blue.position, this.red.position);

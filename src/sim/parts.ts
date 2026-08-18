@@ -740,7 +740,13 @@ export interface BotStats {
   /** Rotational inertia of the rotor, kg m^2. */
   readonly rotorInertia: number;
 
+  /**
+   * Can it drive while upside down? This is a property of the frame alone —
+   * a self-righting arm does not let you drive inverted, it flips you back.
+   */
   readonly invertible: boolean;
+  /** Can it get itself back onto its wheels after being flipped? */
+  readonly selfRighting: boolean;
 }
 
 function byId<T extends { id: string }>(list: readonly T[], id: string, what: string): T {
@@ -851,7 +857,9 @@ export function computeStats(design: BotDesign): BotStats {
     spinUpTime,
     tipSpeedMps,
     rotorInertia,
-    invertible: chassis.invertible || design.srimech,
+    invertible: chassis.invertible,
+    // An invertible frame never needs righting; anything else needs the arm.
+    selfRighting: chassis.invertible || design.srimech,
   };
 }
 

@@ -143,9 +143,11 @@ describe('computeStats', () => {
     expect(stats.legal).toBe(false);
   });
 
-  it('marks a robot invertible if the frame allows it or an srimech is fitted', () => {
+  it('keeps driving inverted and self-righting as separate capabilities', () => {
+    // An invertible frame drives either way up and never needs righting.
     const invertibleFrame = computeStats({ ...defaultDesign(), armorThicknessMm: 1 });
     expect(invertibleFrame.invertible).toBe(true);
+    expect(invertibleFrame.selfRighting).toBe(true);
 
     const base: BotDesign = {
       ...defaultDesign(),
@@ -153,8 +155,16 @@ describe('computeStats', () => {
       weaponId: 'flipper',
       armorThicknessMm: 2,
     };
-    expect(computeStats({ ...base, srimech: false }).invertible).toBe(false);
-    expect(computeStats({ ...base, srimech: true }).invertible).toBe(true);
+    // A self-righting arm does not let you *drive* upside down — it flips you
+    // back over. Conflating the two would mean a robot with an srimech never
+    // bothered to use it.
+    const withArm = computeStats({ ...base, srimech: true });
+    expect(withArm.invertible).toBe(false);
+    expect(withArm.selfRighting).toBe(true);
+
+    const without = computeStats({ ...base, srimech: false });
+    expect(without.invertible).toBe(false);
+    expect(without.selfRighting).toBe(false);
   });
 
   it('rejects unknown part ids loudly', () => {

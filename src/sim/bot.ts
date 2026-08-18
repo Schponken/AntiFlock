@@ -101,7 +101,11 @@ function mountPointFor(stats: BotStats, hullCenterY: number): Vec3 {
   const halfL = c.length / 2;
   switch (stats.weapon.mount) {
     case 'front-horizontal':
-      return { x: halfL * 0.72, y: hullCenterY - c.height * 0.18, z: 0 };
+      // A metre-long bar on a metre-long robot will always sweep back over its
+      // own deck, which is exactly how real horizontal spinners are built. So
+      // it sits just above the deck rather than buried in it, on a shaft
+      // forward of centre.
+      return { x: halfL * 0.5, y: hullCenterY + c.height / 2 + 0.055, z: 0 };
     case 'front-vertical':
       return { x: halfL * 0.82, y: hullCenterY - c.height * 0.3, z: 0 };
     case 'top':
@@ -681,9 +685,12 @@ export class Bot {
     if (!this.isUpsideDown) return;
     if (!this.design.srimech) return;
 
-    // A stiff arm punching the floor: an impulse about the robot's long axis.
+    // A stiff arm punching the floor. The impulse is sized from the energy
+    // actually needed to roll the robot over its own edge — about m*g*h for a
+    // half-width lift — rather than picked to look dramatic, which would fire
+    // it across the arena.
     const axis = this.forwardVector;
-    const strength = this.body.mass() * 2.6;
+    const strength = this.body.mass() * 0.7;
     this.body.applyTorqueImpulse(scale(axis, strength), true);
     this.body.applyImpulseAtPoint(
       { x: 0, y: this.body.mass() * 1.1, z: 0 },

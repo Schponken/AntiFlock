@@ -172,17 +172,48 @@ describe('drivetrain', () => {
     physics.dispose();
   });
 
-  it('turns when steered', () => {
+  it('pivots on the spot at a realistic rate when steered', () => {
     const { physics, fight } = makeFight();
     run(fight, 1);
-    const before = fight.red.forwardVector;
 
-    fight.red.control = { ...neutralControl(), throttle: 0.3, steer: 1 };
+    // Steering with no throttle is a skid-steer pivot, which is the clearest
+    // test of whether the differential drive works at all.
+    let turned = 0;
+    let previous = Math.atan2(fight.red.forwardVector.z, fight.red.forwardVector.x);
+    for (let i = 0; i < 90; i++) {
+      fight.red.control = { ...neutralControl(), throttle: 0, steer: 1 };
+      fight.update(FRAME);
+      const now = Math.atan2(fight.red.forwardVector.z, fight.red.forwardVector.x);
+      let delta = now - previous;
+      while (delta > Math.PI) delta -= 2 * Math.PI;
+      while (delta < -Math.PI) delta += 2 * Math.PI;
+      turned += delta;
+      previous = now;
+    }
+
+    // A heavyweight on a hard floor spins fast — a full turn in a second or
+    // two — but not absurdly so.
+    const degrees = Math.abs(turned) * (180 / Math.PI);
+    expect(degrees, 'the robot barely turned').toBeGreaterThan(120);
+    expect(degrees, 'the robot turned implausibly fast').toBeLessThan(720);
+    physics.dispose();
+  });
+
+  it('describes a wide arc when steering under power, rather than pivoting', () => {
+    const { physics, fight } = makeFight();
+    run(fight, 1);
+    const start = { ...fight.red.position };
+
+    fight.red.control = { ...neutralControl(), throttle: 1, steer: 0.5 };
     run(fight, 2);
 
-    const after = fight.red.forwardVector;
-    const dot = before.x * after.x + before.z * after.z;
-    expect(dot).toBeLessThan(0.8); // it has clearly changed heading
+    // It should both have travelled and changed heading.
+    const travelled = Math.hypot(
+      fight.red.position.x - start.x,
+      fight.red.position.z - start.z,
+    );
+    expect(travelled, 'steering under power stopped it moving').toBeGreaterThan(1);
+    expect(Math.abs(fight.red.body.angvel().y), 'it did not turn at all').toBeGreaterThan(0.2);
     physics.dispose();
   });
 

@@ -300,17 +300,25 @@ export function firePulveriser(pulveriser: PulveriserState): boolean {
   return true;
 }
 
-/** World-space position of a pulveriser's head at its current swing. */
+/** Height of a pulveriser's pivot above the floor. */
+export const PULVERISER_PIVOT_Y = 2.35;
+/** Angle the arm sweeps through, from horizontal at rest to slammed down. */
+export const PULVERISER_SWEEP = Math.PI / 2 - 0.18;
+
+/**
+ * World-space position of a pulveriser's head at its current swing.
+ *
+ * At rest the arm sticks out horizontally over the arena; at full swing it has
+ * slammed down to just above the floor. `yaw` points from the corner toward
+ * the middle of the cage.
+ */
 export function pulveriserHeadPosition(p: PulveriserState): Vec3 {
-  const pivotY = 2.35;
-  // The arm sweeps from straight out to straight down.
-  const angle = -Math.PI / 2 + p.swing * (Math.PI / 2 - 0.18);
-  const reach = PULVERISER_REACH;
-  const horizontal = Math.cos(angle) * reach;
+  const angle = p.swing * PULVERISER_SWEEP; // radians below horizontal
+  const horizontal = Math.cos(angle) * PULVERISER_REACH;
   return {
-    x: p.layout.x - Math.cos(p.layout.yaw) * horizontal,
-    y: pivotY + Math.sin(angle) * reach,
-    z: p.layout.z - Math.sin(p.layout.yaw) * horizontal,
+    x: p.layout.x + Math.cos(p.layout.yaw) * horizontal,
+    y: PULVERISER_PIVOT_Y - Math.sin(angle) * PULVERISER_REACH,
+    z: p.layout.z + Math.sin(p.layout.yaw) * horizontal,
   };
 }
 
