@@ -8,10 +8,8 @@ import {
   condition,
   createHealth,
   driveFraction,
-  impulseShare,
   isImmobilised,
   isWeaponDead,
-  recoilRatio,
   type BotHealth,
   type Hit,
 } from '../src/sim/damage';
@@ -184,21 +182,5 @@ describe('damage model', () => {
     const soaked = energy * (1 - stats.armor.absorption * 0.25);
     const expected = soaked * DAMAGE_PER_JOULE * 1.75;
     expect(before - h.structure).toBeCloseTo(expected, 5);
-  });
-});
-
-describe('collision helpers', () => {
-  it('splits impulse by mass', () => {
-    expect(impulseShare(100, 100)).toBeCloseTo(0.5, 9);
-    // A light robot hitting a heavy one takes most of the impulse itself.
-    expect(impulseShare(50, 150)).toBeCloseTo(0.75, 9);
-    expect(impulseShare(0, 0)).toBe(0.5);
-  });
-
-  it('gives a heavy rotor on a light robot a big recoil ratio', () => {
-    const light = recoilRatio(80, 6, 0.5);
-    const heavy = recoilRatio(160, 6, 0.5);
-    expect(light).toBeGreaterThan(heavy);
-    expect(recoilRatio(100, 0, 0)).toBe(0);
   });
 });

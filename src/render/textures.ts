@@ -355,8 +355,11 @@ export function crowdTexture(): THREE.Texture {
       const depth = row / rows;
       const brightness = 0.25 + 0.75 * (1 - depth);
       const perRow = 76;
+      const rowOffset = rng.range(0, size / perRow);
       for (let i = 0; i < perRow; i++) {
-        const x = (i / perRow) * size + rng.spread(6);
+        // Jitter hard: an evenly spaced grid of heads reads as a honeycomb.
+        const x = (i / perRow) * size + rowOffset + rng.spread(size / perRow);
+        if (rng.chance(0.12)) continue; // empty seats
         const h = rowHeight * rng.range(0.7, 1.15);
         const w = (size / perRow) * rng.range(0.5, 0.85);
         const shade = Math.floor(rng.range(18, 62) * brightness);

@@ -34,6 +34,7 @@ import { judgeDecision, createScoreCard, type Decision, type ScoreCard } from '.
 import { Match, type MatchEvent } from './match';
 import type { BotDesign } from './parts';
 import {
+  PHYSICS_DT,
   Physics,
   dot,
   normalize,
@@ -162,7 +163,12 @@ export class Fight {
       },
     });
 
-    const events = this.match.tick(frameTime, this.tickInput('a'), this.tickInput('b'));
+    // Advance the match by the time actually simulated, not by wall clock. On a
+    // machine that cannot keep up, the physics step count is capped — if the
+    // clock ran on wall time instead, the fight clock, the opening countdown and
+    // the referee's count would all drift ahead of the simulation.
+    const simulated = this.physics.lastStepCount * PHYSICS_DT;
+    const events = this.match.tick(simulated, this.tickInput('a'), this.tickInput('b'));
     if (events.length > 0) this.matchEvents.push(...events);
 
     // When the clock runs out, go to the judges immediately.

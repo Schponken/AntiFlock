@@ -11,6 +11,7 @@
 import * as THREE from 'three';
 import { clamp01, damp, smoothstep } from '../core/math';
 import { ARENA_HALF, CEILING_HEIGHT, WALL_HEIGHT } from '../sim/arena';
+import type { QualitySettings } from './quality';
 
 export interface LightRig {
   group: THREE.Group;
@@ -56,19 +57,35 @@ export function createLightState(): LightState {
   };
 }
 
-export function buildLightRig(scene: THREE.Scene): LightRig {
+/**
+ * Build the rig.
+ *
+ * Every light here exists for the whole session and is only ever dimmed to
+ * zero, never hidden. Three bakes the number of lights of each type into every
+ * material's shader program, so toggling `light.visible` invalidates the
+ * program cache and forces a synchronous recompile of every shader in the
+ * scene. Doing that on, say, the strobe would mean a multi-second stall on
+ * every impact flash. The cost of an unused light is a few instructions per
+ * fragment; the cost of recompiling is the frame.
+ *
+ * That is also why the light count is kept deliberately small.
+ */
+export function buildLightRig(scene: THREE.Scene, quality?: QualitySettings): LightRig {
   const group = new THREE.Group();
   group.name = 'lights';
 
   // A dim cool bounce so nothing is ever fully black.
-  const ambient = new THREE.HemisphereLight(0x8fa6c4, 0x1a1c20, 0.55);
+  const ambient = new THREE.HemisphereLight(0x9db4d0, 0x22252b, 0.55);
   group.add(ambient);
 
   // The key light casts the shadows.
   const key = new THREE.DirectionalLight(0xfff2e0, 2.2);
   key.position.set(6, 14, 8);
-  key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
+  // 1024 is plenty for an arena this size and costs a quarter of what 2048
+  // does. The shadow pass re-renders the whole scene, so this is not free.
+  const shadowSize = quality?.shadowMapSize ?? 1024;
+  key.castShadow = quality?.shadows ?? true;
+  key.shadow.mapSize.set(shadowSize, shadowSize);
   key.shadow.camera.near = 1;
   key.shadow.camera.far = 46;
   const extent = ARENA_HALF + 2;
@@ -81,11 +98,17 @@ export function buildLightRig(scene: THREE.Scene): LightRig {
   group.add(key);
   group.add(key.target);
 
-  // Overhead work lights on the truss, in a grid.
+  // Overhead work lights on the truss.
+  //
+  // Light count is the dominant cost in a forward renderer — every extra light
+  // is evaluated for every lit fragment — so this is deliberately a small
+  // number of wide, soft lamps rather than a dense grid of tight ones. Decay
+  // well below inverse-square gives the overlap that keeps the floor evenly lit
+  // instead of leaving bright pools with black between them.
   const overheads: THREE.PointLight[] = [];
-  for (const x of [-ARENA_HALF * 0.55, ARENA_HALF * 0.55]) {
-    for (const z of [-ARENA_HALF * 0.55, ARENA_HALF * 0.55]) {
-      const lamp = new THREE.PointLight(0xffe9cc, 26, 26, 2);
+  for (const x of [-ARENA_HALF * 0.5, ARENA_HALF * 0.5]) {
+    for (const z of [-ARENA_HALF * 0.5, ARENA_HALF * 0.5]) {
+      const lamp = new THREE.PointLight(0xffe9cc, 40, 44, 1.05);
       lamp.position.set(x, CEILING_HEIGHT - 0.2, z);
       group.add(lamp);
       overheads.push(lamp);
@@ -104,14 +127,13 @@ export function buildLightRig(scene: THREE.Scene): LightRig {
   }
 
   // Warm uplights washing the cage walls.
+  // Two only — red over the red square, blue over the blue.
   const accents: THREE.PointLight[] = [];
   for (const [x, z, colour] of [
-    [-ARENA_HALF + 0.6, 0, 0xff4020],
-    [ARENA_HALF - 0.6, 0, 0x2050ff],
-    [0, -ARENA_HALF + 0.6, 0xff8a20],
-    [0, ARENA_HALF - 0.6, 0xff8a20],
+    [-ARENA_HALF + 0.7, 0, 0xff4020],
+    [ARENA_HALF - 0.7, 0, 0x2050ff],
   ] as const) {
-    const lamp = new THREE.PointLight(colour, 9, 14, 2);
+    const lamp = new THREE.PointLight(colour, 9, 16, 1.7);
     lamp.position.set(x, WALL_HEIGHT * 0.6, z);
     group.add(lamp);
     accents.push(lamp);
@@ -126,8 +148,9 @@ export function buildLightRig(scene: THREE.Scene): LightRig {
   // moody fight lighting makes it impossible to see what you have built.
   const inspection = new THREE.SpotLight(0xf3f7ff, 0, 9, Math.PI / 5, 0.65, 1.1);
   inspection.position.set(0.6, 3.2, 1.4);
-  inspection.castShadow = true;
-  inspection.shadow.mapSize.set(1024, 1024);
+  // No shadow: a second shadow-casting light means a second full scene pass
+  // every frame, and the key light already grounds the robot.
+  inspection.castShadow = false;
   group.add(inspection);
   group.add(inspection.target);
   inspection.target.position.set(0, 0.15, 0);
@@ -185,9 +208,9 @@ export function applyLighting(
 
   const house = levels.house;
 
-  rig.ambient.intensity = 0.1 + house * 0.42;
-  rig.key.intensity = 0.1 + house * 1.5;
-  for (const lamp of rig.overheads) lamp.intensity = house * 26;
+  rig.ambient.intensity = 0.14 + house * 1.05;
+  rig.key.intensity = 0.12 + house * 1.55;
+  for (const lamp of rig.overheads) lamp.intensity = house * 40;
   for (const lamp of rig.accents) {
     // The accents stay up when the house is down — that is what gives the
     // blackout its colour instead of leaving a black screen.

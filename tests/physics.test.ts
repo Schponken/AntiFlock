@@ -10,9 +10,16 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { Physics, initPhysics } from '../src/sim/physics';
 import { Fight } from '../src/sim/fight';
 import { ARENA_HALF, CEILING_HEIGHT, START_POSITIONS } from '../src/sim/arena';
-import { defaultDesign, maxLegalThickness, type BotDesign } from '../src/sim/parts';
+import {
+  CHASSIS,
+  WEAPONS,
+  defaultDesign,
+  isMountCompatible,
+  maxLegalThickness,
+  type BotDesign,
+} from '../src/sim/parts';
 import { mpsToMph } from '../src/core/math';
-import { neutralControl } from '../src/sim/bot';
+import { Bot, neutralControl } from '../src/sim/bot';
 
 const FRAME = 1 / 60;
 
@@ -126,6 +133,88 @@ describe('robots settle on the floor', () => {
     expect(fight.red.position.y).toBeLessThan(CEILING_HEIGHT);
     physics.dispose();
   });
+});
+
+describe('every buildable robot works', () => {
+  // A weapon mounted below the floor line jams the robot solid and it simply
+  // never moves — a silent, total failure that no unit test can see. This walks
+  // the whole catalogue and checks that each legal robot both clears the floor
+  // and can actually drive.
+  const combinations: { chassisId: string; weaponId: string }[] = [];
+  for (const chassis of CHASSIS) {
+    for (const weapon of WEAPONS) {
+      if (isMountCompatible(chassis, weapon)) {
+        combinations.push({ chassisId: chassis.id, weaponId: weapon.id });
+      }
+    }
+  }
+
+  it('covers a broad set of frame and weapon combinations', () => {
+    expect(combinations.length).toBeGreaterThan(20);
+  });
+
+  it('never buries a weapon rotor in the floor', () => {
+    for (const combo of combinations) {
+      const physics = new Physics();
+      const bot = new Bot(
+        physics,
+        'probe',
+        'a',
+        design(combo),
+        { x: 0, y: 0.3, z: 0 },
+        0,
+      );
+
+      if (bot.weaponBody) {
+        const rotorRadius = bot.stats.weapon.radiusM;
+        const spins =
+          bot.stats.weapon.kind === 'vertical-spinner' || bot.stats.weapon.kind === 'drum';
+        if (spins) {
+          // The body origin sits on the axle line, so the floor is one wheel
+          // radius below it.
+          const floorY = -bot.stats.drive.wheelRadiusM;
+          const lowest = bot.weaponMountLocal.y - rotorRadius;
+          expect(
+            lowest,
+            `${combo.chassisId} + ${combo.weaponId}: rotor reaches ${lowest.toFixed(3)} but the floor is at ${floorY.toFixed(3)}`,
+          ).toBeGreaterThanOrEqual(floorY - 1e-6);
+        }
+      }
+      physics.dispose();
+    }
+  });
+
+  it('lets every combination drive away from a standing start', () => {
+    const stuck: string[] = [];
+
+    for (const combo of combinations) {
+      const physics = new Physics();
+      const fight = new Fight(physics, {
+        redDesign: design(combo),
+        // A plain brick opponent, parked out of the way.
+        blueDesign: design({ chassisId: 'brick', weaponId: 'none' }),
+        hazards: false,
+        seed: 7,
+      });
+      fight.start();
+      fight.match.skipIntro();
+
+      run(fight, 1);
+      const start = { ...fight.red.position };
+      for (let i = 0; i < 120; i++) {
+        fight.red.control = { ...neutralControl(), throttle: 1 };
+        fight.update(FRAME);
+      }
+      const moved = Math.hypot(
+        fight.red.position.x - start.x,
+        fight.red.position.z - start.z,
+      );
+      if (moved < 0.6) stuck.push(`${combo.chassisId}+${combo.weaponId} (${moved.toFixed(2)} m)`);
+      physics.dispose();
+    }
+
+    expect(stuck, `these robots could not drive: ${stuck.join(', ')}`).toEqual([]);
+  }, 120_000);
 });
 
 describe('drivetrain', () => {

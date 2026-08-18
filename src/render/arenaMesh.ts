@@ -19,7 +19,6 @@ import {
   SAW_RISE,
   WALL_HEIGHT,
   type Arena,
-  pulveriserHeadPosition,
 } from '../sim/arena';
 import {
   crowdTexture,
@@ -38,9 +37,12 @@ export interface ArenaView {
   sawBlades: THREE.Mesh[][];
   /** Pulveriser arms, one per corner. */
   pulveriserArms: THREE.Group[];
-  /** The four corner safety lights, red before the fight and green during. */
-  safetyLights: THREE.Mesh[];
-  safetyLightMaterial: THREE.MeshStandardMaterial;
+  /**
+   * The four corner start lights: red while the robots are held in their
+   * squares, green once the fight is live.
+   */
+  startLights: THREE.Mesh[];
+  startLightMaterial: THREE.MeshStandardMaterial;
   /** Wall panels, so the intro can flash them. */
   wallMaterial: THREE.MeshPhysicalMaterial;
 }
@@ -225,24 +227,56 @@ export function buildArenaView(): ArenaView {
     const blades: THREE.Mesh[] = [];
     const first = -((layout.bladeCount - 1) / 2) * layout.spacing;
 
-    // The slot the blades come out of.
+    // The slot the blades come out of, built as an open-topped box sunk into
+    // the floor. A flat dark quad laid on the floor reads as a sticker; giving
+    // the recess real walls is what makes it read as a hole.
     const slotWidth = layout.radius * 2.1;
     const slotDepth = layout.spacing * layout.bladeCount + 0.18;
-    const slot = new THREE.Mesh(new THREE.PlaneGeometry(slotWidth, slotDepth), slotMaterial);
-    slot.rotation.x = -Math.PI / 2;
-    // Sunk below the floor so it reads as a recess, with a lip around it.
-    slot.position.set(layout.x, -0.05, layout.z);
-    root.add(slot);
+    const wellDepth = layout.radius + 0.12;
 
-    const lip = new THREE.Mesh(
-      new THREE.RingGeometry(0, 1, 4, 1),
-      new THREE.MeshBasicMaterial({ color: 0x05060a, side: THREE.DoubleSide, depthWrite: false }),
-    );
-    lip.rotation.x = -Math.PI / 2;
-    lip.rotation.z = Math.PI / 4;
-    lip.scale.set(slotWidth * 0.72, slotDepth * 0.72, 1);
-    lip.position.set(layout.x, 0.004, layout.z);
-    root.add(lip);
+    const floorPan = new THREE.Mesh(new THREE.PlaneGeometry(slotWidth, slotDepth), slotMaterial);
+    floorPan.rotation.x = -Math.PI / 2;
+    floorPan.position.set(layout.x, -wellDepth, layout.z);
+    root.add(floorPan);
+
+    const wallMat = new THREE.MeshStandardMaterial({
+      map: paintedSteelTexture(0x1b1e23),
+      roughness: 0.85,
+      metalness: 0.6,
+      side: THREE.DoubleSide,
+    });
+    const sides: [number, number, number, number, number][] = [
+      // width, height, x offset, z offset, yaw
+      [slotWidth, wellDepth, 0, -slotDepth / 2, 0],
+      [slotWidth, wellDepth, 0, slotDepth / 2, Math.PI],
+      [slotDepth, wellDepth, -slotWidth / 2, 0, Math.PI / 2],
+      [slotDepth, wellDepth, slotWidth / 2, 0, -Math.PI / 2],
+    ];
+    for (const [w, h, dx, dz, yaw] of sides) {
+      const wall = new THREE.Mesh(new THREE.PlaneGeometry(w, h), wallMat);
+      wall.position.set(layout.x + dx, -h / 2, layout.z + dz);
+      wall.rotation.y = yaw;
+      root.add(wall);
+    }
+
+    // A worn steel lip around the opening. Kept rough and dark: a polished trim
+    // catches the overhead lamps and reads as a bright rectangle painted on the
+    // floor rather than as the edge of a hole.
+    const lipMat = new THREE.MeshStandardMaterial({
+      map: metalTexture(0x3c4148),
+      roughness: 0.78,
+      metalness: 0.8,
+    });
+    for (const [w, d, dx, dz] of [
+      [slotWidth + 0.16, 0.08, 0, -slotDepth / 2 - 0.04],
+      [slotWidth + 0.16, 0.08, 0, slotDepth / 2 + 0.04],
+      [0.08, slotDepth + 0.16, -slotWidth / 2 - 0.04, 0],
+      [0.08, slotDepth + 0.16, slotWidth / 2 + 0.04, 0],
+    ] as const) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(w, 0.02, d), lipMat);
+      bar.position.set(layout.x + dx, 0.01, layout.z + dz);
+      root.add(bar);
+    }
 
     for (let i = 0; i < layout.bladeCount; i++) {
       const z = layout.z + first + i * layout.spacing;
@@ -311,27 +345,27 @@ export function buildArenaView(): ArenaView {
     pulveriserArms.push(arm);
   }
 
-  // --- Safety lights ---------------------------------------------------------
-  const safetyLightMaterial = new THREE.MeshStandardMaterial({
+  // --- Start lights ----------------------------------------------------------
+  const startLightMaterial = new THREE.MeshStandardMaterial({
     color: 0x330000,
     emissive: 0xff1500,
     emissiveIntensity: 2.4,
     roughness: 0.3,
   });
-  const safetyLights: THREE.Mesh[] = [];
+  const startLights: THREE.Mesh[] = [];
   for (const corner of [
     [-ARENA_HALF + 0.35, -ARENA_HALF + 0.35],
     [ARENA_HALF - 0.35, -ARENA_HALF + 0.35],
     [-ARENA_HALF + 0.35, ARENA_HALF - 0.35],
     [ARENA_HALF - 0.35, ARENA_HALF - 0.35],
   ] as const) {
-    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 12), safetyLightMaterial);
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 12), startLightMaterial);
     lamp.position.set(corner[0], WALL_HEIGHT + 0.35, corner[1]);
     root.add(lamp);
-    safetyLights.push(lamp);
+    startLights.push(lamp);
   }
 
-  return { root, sawBlades, pulveriserArms, safetyLights, safetyLightMaterial, wallMaterial };
+  return { root, sawBlades, pulveriserArms, startLights, startLightMaterial, wallMaterial };
 }
 
 /** Push the simulation's hazard state onto the meshes. */
@@ -357,6 +391,3 @@ export function syncArenaView(view: ArenaView, arena: Arena): void {
     arm.rotation.z = -pulveriser.swing * PULVERISER_SWEEP;
   }
 }
-
-/** Where a pulveriser head is, for spawning sparks at the right place. */
-export { pulveriserHeadPosition };

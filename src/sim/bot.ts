@@ -62,6 +62,13 @@ export interface BotControl {
   selfRight: boolean;
 }
 
+/** Extra impulse over the theoretical minimum needed to roll a robot over. */
+const SELF_RIGHT_MARGIN = 1.6;
+/** Seconds before the self-righting arm can fire again. */
+const SELF_RIGHT_COOLDOWN = 1.1;
+/** How close a vertical rotor's lowest point gets to the floor, in metres. */
+const VERTICAL_ROTOR_CLEARANCE = 0.012;
+
 export function neutralControl(): BotControl {
   return { throttle: 0, steer: 0, weapon: 0, fire: false, selfRight: false };
 }
@@ -95,21 +102,41 @@ function spinAxisFor(stats: BotStats): Vec3 {
   }
 }
 
-/** Where the weapon's pivot sits on the chassis, in chassis local space. */
+/**
+ * Where the weapon's pivot sits on the chassis, in chassis local space.
+ *
+ * The body origin is on the axle line, so the floor is one wheel radius below
+ * it. A rotor's pivot therefore has to sit at least its own radius above that,
+ * or the disc is buried in the steel and the robot cannot move — which is a
+ * silent, total failure rather than an obvious one.
+ */
 function mountPointFor(stats: BotStats, hullCenterY: number): Vec3 {
   const c = stats.chassis;
+  const w = stats.weapon;
   const halfL = c.length / 2;
-  switch (stats.weapon.mount) {
+  const floorY = -stats.drive.wheelRadiusM;
+
+  switch (w.mount) {
     case 'front-horizontal':
       // A metre-long bar on a metre-long robot will always sweep back over its
       // own deck, which is exactly how real horizontal spinners are built. So
       // it sits just above the deck rather than buried in it, on a shaft
       // forward of centre.
       return { x: halfL * 0.5, y: hullCenterY + c.height / 2 + 0.055, z: 0 };
-    case 'front-vertical':
-      return { x: halfL * 0.82, y: hullCenterY - c.height * 0.3, z: 0 };
+
+    case 'front-vertical': {
+      const preferred = hullCenterY - c.height * 0.3;
+      // A spinning rotor must clear the floor by a hair — an undercutter wants
+      // its teeth as low as they will go, but not through the plate. Arms have
+      // no radius and can sit wherever the frame puts them.
+      const spins = w.kind === 'vertical-spinner' || w.kind === 'drum';
+      const lowest = spins ? floorY + w.radiusM + VERTICAL_ROTOR_CLEARANCE : floorY + 0.02;
+      return { x: halfL * 0.82, y: Math.max(preferred, lowest), z: 0 };
+    }
+
     case 'top':
       return { x: -halfL * 0.25, y: hullCenterY + c.height * 0.55, z: 0 };
+
     default:
       return { x: 0, y: hullCenterY, z: 0 };
   }
@@ -168,6 +195,8 @@ export class Bot {
   stillTime = 0;
   /** Set for one tick when the self-righting mechanism fires. */
   justSelfRighted = false;
+  /** Seconds until the self-righting arm has recharged. */
+  private selfRightCooldown = 0;
 
   constructor(
     private readonly physics: Physics,
@@ -458,6 +487,8 @@ export class Bot {
       return;
     }
 
+    if (this.selfRightCooldown > 0) this.selfRightCooldown = Math.max(0, this.selfRightCooldown - dt);
+
     this.updateGroundContacts();
     this.applyDrive(dt);
     this.driveWeapon(dt, this.control.weapon, this.control.fire);
@@ -498,6 +529,19 @@ export class Bot {
   // Drivetrain
   // -------------------------------------------------------------------------
 
+  /**
+   * Ignore this robot's own parts when looking for the floor.
+   *
+   * Excluding the chassis body is not enough: the weapon is a separate rigid
+   * body, and a front-mounted drum sits close enough to the front wheels that a
+   * wheel's downward ray can land on it. Without this the robot would think it
+   * was standing on its own weapon and apply drive force against it.
+   */
+  private readonly notOwnParts = (collider: RAPIER.Collider): boolean => {
+    const owner = this.physics.ownerOf(collider.handle);
+    return !owner || owner.botId !== this.id;
+  };
+
   private updateGroundContacts(): void {
     const rot = this.rotation;
     const pos = this.position;
@@ -517,6 +561,7 @@ export class Bot {
         undefined,
         undefined,
         this.body,
+        this.notOwnParts,
       );
 
       if (hit) {
@@ -680,24 +725,37 @@ export class Bot {
     joint.configureMotorVelocity(target, dead ? 0 : Math.max(torque, 1));
   }
 
+  /**
+   * Fire the self-righting arm.
+   *
+   * The impulse is sized from the physics rather than tuned by eye. Rolling a
+   * robot back onto its wheels means lifting its centre of mass over its own
+   * edge, which costs about `m·g·(width/2)` of energy. Converting that to an
+   * angular impulse about the roll axis gives `sqrt(2·E·I)`, and a margin on top
+   * covers friction and the fact that it rarely lands square.
+   *
+   * It is a one-shot with a recharge, so holding the control down cannot pump
+   * energy in every step and launch the robot across the arena.
+   */
   private applySelfRight(): void {
+    if (this.selfRightCooldown > 0) return;
     if (!this.control.selfRight) return;
     if (!this.isUpsideDown) return;
     if (!this.design.srimech) return;
 
-    // A stiff arm punching the floor. The impulse is sized from the energy
-    // actually needed to roll the robot over its own edge — about m*g*h for a
-    // half-width lift — rather than picked to look dramatic, which would fire
-    // it across the arena.
-    const axis = this.forwardVector;
-    const strength = this.body.mass() * 0.7;
-    this.body.applyTorqueImpulse(scale(axis, strength), true);
-    this.body.applyImpulseAtPoint(
-      { x: 0, y: this.body.mass() * 1.1, z: 0 },
-      this.position,
-      true,
-    );
+    const mass = this.body.mass();
+    const c = this.stats.chassis;
+    // Moment of inertia about the robot's long axis, as a box.
+    const rollInertia = Math.max(0.05, (mass / 12) * (c.width * c.width + c.height * c.height));
+    const liftEnergy = mass * 9.81 * (c.width / 2);
+    const impulse = Math.sqrt(2 * liftEnergy * rollInertia) * SELF_RIGHT_MARGIN;
+
+    this.body.applyTorqueImpulse(scale(this.forwardVector, impulse), true);
+    // A small hop, so the edge it is pivoting on can break free of the floor.
+    this.body.applyImpulseAtPoint({ x: 0, y: mass * 0.9, z: 0 }, this.position, true);
+
     this.justSelfRighted = true;
+    this.selfRightCooldown = SELF_RIGHT_COOLDOWN;
     this.control.selfRight = false;
   }
 
@@ -722,22 +780,6 @@ export class Bot {
     if (ax >= ay && ax >= az) return nx >= 0 ? 'front' : 'rear';
     if (az >= ay) return nz >= 0 ? 'left' : 'right';
     return ny >= 0 ? 'top' : 'bottom';
-  }
-
-  /** Index of the wheel nearest a world point, or -1 if none is close. */
-  nearestWheel(worldPoint: Vec3): number {
-    const local = rotateVecInverse(this.rotation, sub(worldPoint, this.position));
-    let best = -1;
-    let bestDist = Infinity;
-    for (let i = 0; i < this.wheels.length; i++) {
-      const w = this.wheels[i]!;
-      const d = Math.hypot(local.x - w.local.x, local.y - w.local.y, local.z - w.local.z);
-      if (d < bestDist) {
-        bestDist = d;
-        best = i;
-      }
-    }
-    return bestDist < this.stats.drive.wheelRadiusM * 1.6 ? best : -1;
   }
 
   takeHit(hit: Hit, rng: Rng): DamageResult {
@@ -784,6 +826,7 @@ export class Bot {
     this.burstActive = false;
     this.burstTimer = 0;
     this.burstCooldown = 0;
+    this.selfRightCooldown = 0;
     this.stillTime = 0;
   }
 }

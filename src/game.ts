@@ -17,7 +17,7 @@ import { GameRenderer, emitTyreSmoke } from './render/renderer';
 import { GaragePreview } from './render/preview';
 import { flash } from './render/lighting';
 import { Fight } from './sim/fight';
-import { Physics, initPhysics } from './sim/physics';
+import { MAX_FRAME_TIME, Physics, initPhysics } from './sim/physics';
 import { neutralControl } from './sim/bot';
 import { cloneDesign, computeStats, defaultDesign, type BotDesign } from './sim/parts';
 import { pickOpponent, randomDesign } from './sim/roster';
@@ -375,9 +375,14 @@ export class Game {
     const live = fight.match.live;
 
     // --- Controls -------------------------------------------------------------
-    const playerControl = live ? this.input.read(dt) : neutralControl();
+    // Control timing is clamped to the same ceiling the physics uses. The
+    // weapon throttle ramp and the opponent's reaction lag are both measured in
+    // seconds, and on a machine that cannot keep up they would otherwise run
+    // ahead of the simulation they are steering.
+    const controlDt = Math.min(dt, MAX_FRAME_TIME);
+    const playerControl = live ? this.input.read(controlDt) : neutralControl();
     fight.setControl('a', playerControl);
-    fight.setControl('b', this.opponent.drive(fight.blue, fight.red, dt, live));
+    fight.setControl('b', this.opponent.drive(fight.blue, fight.red, controlDt, live));
 
     // --- Simulate -------------------------------------------------------------
     fight.update(dt);
@@ -540,6 +545,7 @@ export class Game {
     const lines = [
       `phase      ${fight.match.phase}  t=${fight.match.timeRemaining.toFixed(1)}`,
       `steps      ${fight.physics.lastStepCount}/frame   fx ${this.renderer.effects.liveCount}`,
+      `render     ${(this.renderer.currentRenderScale * 100).toFixed(0)}% scale`,
       '',
       `RED  ${red.design.name}`,
       `  cond ${(fight.conditionOf('a') * 100).toFixed(0)}%  struct ${red.health.structure.toFixed(0)}`,

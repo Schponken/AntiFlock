@@ -13,7 +13,7 @@
  * Pure module: no physics, no rendering, fully unit tested.
  */
 
-import { clamp, clamp01 } from '../core/math';
+import { clamp01 } from '../core/math';
 import type { Rng } from '../core/rng';
 import type { BotStats } from './parts';
 
@@ -279,25 +279,4 @@ export function condition(health: BotHealth): number {
   const structFrac = health.structureMax > 0 ? health.structure / health.structureMax : 0;
   const driveFrac = driveFraction(health);
   return clamp01(0.25 * armorFrac + 0.55 * structFrac + 0.2 * driveFrac);
-}
-
-/**
- * Torque reaction ratio: how violently a spinner's own hit throws the robot
- * that threw it. Light robots with heavy weapons go flying too — this is what
- * makes big spinners genuinely risky to drive.
- */
-export function recoilRatio(attackerMassKg: number, rotorInertia: number, radiusM: number): number {
-  if (radiusM <= 0 || attackerMassKg <= 0) return 0;
-  const effectiveRotorMass = rotorInertia / (radiusM * radiusM);
-  return clamp(effectiveRotorMass / attackerMassKg, 0, 1.5);
-}
-
-/**
- * Split a total impulse between the two robots by mass, the way a real
- * collision does. Returns the attacker's share, 0..1.
- */
-export function impulseShare(attackerMassKg: number, targetMassKg: number): number {
-  const total = attackerMassKg + targetMassKg;
-  if (total <= 0) return 0.5;
-  return targetMassKg / total;
 }

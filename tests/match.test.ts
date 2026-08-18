@@ -30,7 +30,7 @@ describe('start sequence', () => {
     expect(START_SEQUENCE_DURATION).toBeGreaterThan(8);
   });
 
-  it('runs the whole show: dark, introductions, safety light, three-two-one, activate', () => {
+  it('runs the whole show: dark, introductions, start light, three-two-one, activate', () => {
     const m = new Match();
     m.start();
     expect(m.phase).toBe('intro');
@@ -45,7 +45,7 @@ describe('start sequence', () => {
       'introduce-red',
       'introduce-blue',
       'lights-full',
-      'safety-light-red',
+      'start-light-red',
       'drivers-ready',
       'count-3',
       'count-2',

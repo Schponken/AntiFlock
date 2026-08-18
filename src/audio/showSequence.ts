@@ -5,7 +5,7 @@
  * match. The cue list lives in `sim/match` so it can be tested without a
  * browser; this module is what those cues actually *do* — the blackout, the
  * crowd swelling, the spotlights picking out each robot as it is introduced,
- * the lights slamming back up, the safety light going red, the three beeps and
+ * the lights slamming back up, the start light going red, the three beeps and
  * the horn.
  *
  * Every cue drives lighting, audio and camera together from one place, which is
@@ -43,7 +43,7 @@ export class ShowDirector {
     renderer.lightState.house = 1;
     renderer.lightState.spot = 0;
     renderer.lightState.accent = 0.55;
-    renderer.setSafetyLight(false);
+    renderer.setStartLight(false);
     this.sweeping = false;
     this.fightLive = false;
     audio.setCrowd(0.18);
@@ -111,8 +111,8 @@ export class ShowDirector {
         renderer.director.mode = 'broadcast';
         break;
 
-      case 'safety-light-red':
-        renderer.setSafetyLight(false);
+      case 'start-light-red':
+        renderer.setStartLight(false);
         break;
 
       case 'drivers-ready':
@@ -140,7 +140,7 @@ export class ShowDirector {
         audio.beep(1040, 0.5, 0.4);
         audio.horn(1.5, 146);
         audio.setCrowd(1, 0.4);
-        renderer.setSafetyLight(true);
+        renderer.setStartLight(true);
         flash(renderer.lightState, 1);
         renderer.director.addShake(0.35);
         this.fightLive = true;
@@ -189,7 +189,7 @@ export class ShowDirector {
         audio.setCrowd(1, 0.3);
         flash(renderer.lightState, 1);
         renderer.director.addShake(0.5);
-        renderer.setSafetyLight(false);
+        renderer.setStartLight(false);
         this.fightLive = false;
         break;
       }
@@ -197,7 +197,7 @@ export class ShowDirector {
       case 'time-expired':
         announcer.say('Time! The match goes to the judges.', 0.9);
         audio.horn(2.2, 118);
-        renderer.setSafetyLight(false);
+        renderer.setStartLight(false);
         this.fightLive = false;
         break;
 

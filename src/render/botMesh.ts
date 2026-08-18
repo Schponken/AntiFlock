@@ -198,6 +198,46 @@ export function buildBotView(bot: Bot, design: BotDesign): BotView {
     wheels.push(tyre);
   }
 
+  // --- Weapon mount ----------------------------------------------------------
+  // The rotor is a separate rigid body drawn at its own transform, so without
+  // this the weapon appears to float unsupported next to the robot.
+  if (stats.weapon.kind !== 'none') {
+    const mountMat = new THREE.MeshStandardMaterial({
+      map: metalTexture(0x5d636b),
+      metalness: 0.95,
+      roughness: 0.45,
+    });
+    const mount = bot.weaponMountLocal;
+    const deck = bot.hullCenterY + stats.chassis.height / 2;
+
+    if (stats.weapon.mount === 'front-horizontal') {
+      // A vertical shaft up from the deck to the bar's pivot.
+      const height = Math.max(0.04, mount.y - deck + 0.06);
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.055, 0.075, height, 12),
+        mountMat,
+      );
+      shaft.position.set(mount.x, deck + height / 2 - 0.03, 0);
+      shaft.castShadow = true;
+      root.add(shaft);
+    } else {
+      // Bearing blocks either side of the rotor's axle.
+      for (const sign of [-1, 1]) {
+        const block = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.13, 0.07), mountMat);
+        block.position.set(mount.x, mount.y, sign * (stats.chassis.width * 0.4));
+        block.castShadow = true;
+        root.add(block);
+      }
+      // And a pair of rails back to the hull.
+      const rail = new THREE.Mesh(
+        new THREE.BoxGeometry(Math.max(0.08, mount.x * 0.5), 0.05, stats.chassis.width * 0.86),
+        mountMat,
+      );
+      rail.position.set(mount.x * 0.7, mount.y + 0.02, 0);
+      root.add(rail);
+    }
+  }
+
   // --- Weapon ----------------------------------------------------------------
   const weapon = buildWeaponMesh(bot, design);
 
@@ -241,11 +281,17 @@ function buildWeaponMesh(bot: Bot, design: BotDesign): THREE.Group | null {
   const group = new THREE.Group();
   group.name = `weapon-${bot.id}`;
 
+  // Declared transparent up front even though they start fully opaque: a
+  // spinning rotor is faded out to suggest motion blur, and switching
+  // `transparent` on later would change the material's shader program and stall
+  // the frame while it recompiled.
   const steel = new THREE.MeshStandardMaterial({
     map: metalTexture(0xa8aeb6),
     roughness: 0.28,
     metalness: 1.0,
     envMapIntensity: 1.4,
+    transparent: true,
+    opacity: 1,
   });
   const accent = new THREE.MeshStandardMaterial({
     color: design.accentColor,
@@ -253,6 +299,8 @@ function buildWeaponMesh(bot: Bot, design: BotDesign): THREE.Group | null {
     emissiveIntensity: 0.35,
     roughness: 0.35,
     metalness: 0.7,
+    transparent: true,
+    opacity: 1,
   });
 
   switch (w.kind) {
@@ -262,8 +310,10 @@ function buildWeaponMesh(bot: Bot, design: BotDesign): THREE.Group | null {
       group.add(bar);
       // Teeth at each end.
       for (const sign of [-1, 1]) {
-        const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.14, 0.16), accent);
-        tooth.position.set(0.03, 0, sign * (w.radiusM - 0.07));
+        const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.115, 0.11), accent);
+        tooth.position.set(0.035, 0, sign * (w.radiusM - 0.05));
+        // Rake the teeth so they bite in the direction of rotation.
+        tooth.rotation.y = sign * 0.22;
         tooth.castShadow = true;
         group.add(tooth);
       }

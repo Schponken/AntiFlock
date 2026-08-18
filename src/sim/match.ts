@@ -34,7 +34,7 @@ export type CueKind =
   | 'introduce-red'
   | 'introduce-blue'
   | 'lights-full'
-  | 'safety-light-red'
+  | 'start-light-red'
   | 'drivers-ready'
   | 'count-3'
   | 'count-2'
@@ -52,7 +52,7 @@ export interface Cue {
 /**
  * The opening sequence, beat for beat: the house goes dark, the spotlights
  * sweep the cage, both robots are introduced, the lights slam back up, the
- * safety light goes red, and then three, two, one — activate.
+ * start light goes red, and then three, two, one — activate.
  */
 export const START_SEQUENCE: readonly Cue[] = [
   { t: 0.0, kind: 'house-lights-down' },
@@ -61,7 +61,7 @@ export const START_SEQUENCE: readonly Cue[] = [
   { t: 1.6, kind: 'introduce-red', line: 'In the red square — {red}!' },
   { t: 4.4, kind: 'introduce-blue', line: 'And in the blue square — {blue}!' },
   { t: 7.2, kind: 'lights-full' },
-  { t: 7.5, kind: 'safety-light-red' },
+  { t: 7.5, kind: 'start-light-red' },
   { t: 8.0, kind: 'drivers-ready', line: 'Drivers, take your positions.' },
   { t: 10.4, kind: 'count-3', line: 'Three' },
   { t: 11.4, kind: 'count-2', line: 'Two' },

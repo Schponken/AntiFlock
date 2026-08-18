@@ -16,8 +16,14 @@ import RAPIER from '@dimforge/rapier3d-compat';
 /** Physics runs at a fixed 240 Hz regardless of display refresh rate. */
 export const PHYSICS_HZ = 240;
 export const PHYSICS_DT = 1 / PHYSICS_HZ;
-/** Never simulate more than this much wall-clock time in one frame. */
-export const MAX_FRAME_TIME = 0.1;
+/**
+ * Never simulate more than this much wall-clock time in one frame.
+ *
+ * At 240 Hz this caps a frame at twelve substeps. Allowing more means a machine
+ * that is already struggling does progressively more physics work per frame and
+ * spirals; the game slows down instead, which is the right trade.
+ */
+export const MAX_FRAME_TIME = 1 / 20;
 
 let initialised = false;
 
@@ -117,10 +123,7 @@ export class Physics {
     this.owners.set(collider.handle, owner);
   }
 
-  unregister(collider: RAPIER.Collider): void {
-    this.owners.delete(collider.handle);
-  }
-
+  /** What does this collider belong to? Used to filter a robot's own parts. */
   ownerOf(handle: number): ColliderOwner | undefined {
     return this.owners.get(handle);
   }
@@ -158,11 +161,6 @@ export class Physics {
       }
     }
     this.lastStepCount = steps;
-  }
-
-  /** Fraction of a physics step left over, for render interpolation. */
-  get interpolationAlpha(): number {
-    return this.accumulator / PHYSICS_DT;
   }
 
   private collectContacts(): ContactReport[] {

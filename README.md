@@ -110,7 +110,7 @@ the audio and the on-screen graphics all read from one timeline:
 
 the house lights drop and the crowd comes up → the spotlights sweep the cage →
 each robot is introduced in turn with a lower-third and its specification → the
-lights slam back up → the safety light goes red → three, two, one → **activate**,
+lights slam back up → the start light goes red → three, two, one → **activate**,
 with the horn, the strobe, and the light going green.
 
 Press `Enter` at any point to skip it.

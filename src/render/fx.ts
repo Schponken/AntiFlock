@@ -17,6 +17,15 @@ const MAX_SPARKS = 1400;
 const MAX_SMOKE = 220;
 const MAX_DEBRIS = 90;
 
+/**
+ * Pool sizes are fixed at construction so the buffers never have to be
+ * reallocated, and scaled by the quality tier — a software rasteriser pays for
+ * every one of these as a screen-space quad.
+ */
+function poolSize(base: number, scale: number): number {
+  return Math.max(16, Math.round(base * scale));
+}
+
 interface Particle {
   life: number;
   maxLife: number;
@@ -38,6 +47,10 @@ function blank(): Particle {
 export class Effects {
   readonly group = new THREE.Group();
 
+  private readonly maxSparks: number;
+  private readonly maxSmoke: number;
+  private readonly maxDebris: number;
+
   private sparks: Particle[] = [];
   private smoke: Particle[] = [];
   private debris: Particle[] = [];
@@ -49,21 +62,23 @@ export class Effects {
 
   private smokePoints: THREE.Points;
   private smokePositions: Float32Array;
-  private smokeOpacity: Float32Array;
   private smokeSizes: Float32Array;
 
   private debrisMesh: THREE.InstancedMesh;
   private debrisRotations: number[] = [];
   private dummy = new THREE.Object3D();
 
-  constructor() {
+  constructor(particleScale = 1) {
     this.group.name = 'fx';
+    this.maxSparks = poolSize(MAX_SPARKS, particleScale);
+    this.maxSmoke = poolSize(MAX_SMOKE, particleScale);
+    this.maxDebris = poolSize(MAX_DEBRIS, particleScale);
 
     // --- Sparks --------------------------------------------------------------
-    for (let i = 0; i < MAX_SPARKS; i++) this.sparks.push(blank());
-    this.sparkPositions = new Float32Array(MAX_SPARKS * 3);
-    this.sparkColors = new Float32Array(MAX_SPARKS * 3);
-    this.sparkSizes = new Float32Array(MAX_SPARKS);
+    for (let i = 0; i < this.maxSparks; i++) this.sparks.push(blank());
+    this.sparkPositions = new Float32Array(this.maxSparks * 3);
+    this.sparkColors = new Float32Array(this.maxSparks * 3);
+    this.sparkSizes = new Float32Array(this.maxSparks);
 
     const sparkGeometry = new THREE.BufferGeometry();
     sparkGeometry.setAttribute('position', new THREE.BufferAttribute(this.sparkPositions, 3));
@@ -86,10 +101,9 @@ export class Effects {
     this.group.add(this.sparkPoints);
 
     // --- Smoke ---------------------------------------------------------------
-    for (let i = 0; i < MAX_SMOKE; i++) this.smoke.push(blank());
-    this.smokePositions = new Float32Array(MAX_SMOKE * 3);
-    this.smokeOpacity = new Float32Array(MAX_SMOKE);
-    this.smokeSizes = new Float32Array(MAX_SMOKE);
+    for (let i = 0; i < this.maxSmoke; i++) this.smoke.push(blank());
+    this.smokePositions = new Float32Array(this.maxSmoke * 3);
+    this.smokeSizes = new Float32Array(this.maxSmoke);
 
     const smokeGeometry = new THREE.BufferGeometry();
     smokeGeometry.setAttribute('position', new THREE.BufferAttribute(this.smokePositions, 3));
@@ -110,18 +124,18 @@ export class Effects {
     this.group.add(this.smokePoints);
 
     // --- Debris --------------------------------------------------------------
-    for (let i = 0; i < MAX_DEBRIS; i++) {
+    for (let i = 0; i < this.maxDebris; i++) {
       this.debris.push(blank());
       this.debrisRotations.push(0);
     }
     this.debrisMesh = new THREE.InstancedMesh(
       new THREE.BoxGeometry(0.05, 0.012, 0.03),
       new THREE.MeshStandardMaterial({ color: 0x9aa1a9, metalness: 1, roughness: 0.4 }),
-      MAX_DEBRIS,
+      this.maxDebris,
     );
     this.debrisMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.debrisMesh.frustumCulled = false;
-    this.debrisMesh.count = MAX_DEBRIS;
+    this.debrisMesh.count = this.maxDebris;
     this.group.add(this.debrisMesh);
 
     // Park everything off-screen until it is used.
@@ -129,12 +143,12 @@ export class Effects {
   }
 
   private hideAll(): void {
-    for (let i = 0; i < MAX_SPARKS; i++) this.sparkSizes[i] = 0;
-    for (let i = 0; i < MAX_SMOKE; i++) this.smokeSizes[i] = 0;
+    for (let i = 0; i < this.maxSparks; i++) this.sparkSizes[i] = 0;
+    for (let i = 0; i < this.maxSmoke; i++) this.smokeSizes[i] = 0;
     this.dummy.position.set(0, -1000, 0);
     this.dummy.scale.setScalar(0.0001);
     this.dummy.updateMatrix();
-    for (let i = 0; i < MAX_DEBRIS; i++) this.debrisMesh.setMatrixAt(i, this.dummy.matrix);
+    for (let i = 0; i < this.maxDebris; i++) this.debrisMesh.setMatrixAt(i, this.dummy.matrix);
     this.debrisMesh.instanceMatrix.needsUpdate = true;
   }
 
@@ -239,7 +253,7 @@ export class Effects {
     const step = Math.min(dt, 0.05);
 
     // --- Sparks --------------------------------------------------------------
-    for (let i = 0; i < MAX_SPARKS; i++) {
+    for (let i = 0; i < this.maxSparks; i++) {
       const p = this.sparks[i]!;
       const o = i * 3;
       if (p.life <= 0) {
@@ -281,12 +295,11 @@ export class Effects {
     }
 
     // --- Smoke ---------------------------------------------------------------
-    for (let i = 0; i < MAX_SMOKE; i++) {
+    for (let i = 0; i < this.maxSmoke; i++) {
       const p = this.smoke[i]!;
       const o = i * 3;
       if (p.life <= 0) {
         this.smokeSizes[i] = 0;
-        this.smokeOpacity[i] = 0;
         continue;
       }
       p.life -= step;
@@ -301,13 +314,13 @@ export class Effects {
       this.smokePositions[o] = p.px;
       this.smokePositions[o + 1] = p.py;
       this.smokePositions[o + 2] = p.pz;
-      // Smoke expands as it fades.
-      this.smokeSizes[i] = p.size * (1.6 - t * 0.6);
-      this.smokeOpacity[i] = t;
+      // Smoke expands and thins as it ages. Points share one material opacity,
+      // so the fade is carried by size rather than per-particle alpha.
+      this.smokeSizes[i] = p.size * (1.6 - t * 0.55) * (t > 0.15 ? 1 : t / 0.15);
     }
 
     // --- Debris --------------------------------------------------------------
-    for (let i = 0; i < MAX_DEBRIS; i++) {
+    for (let i = 0; i < this.maxDebris; i++) {
       const p = this.debris[i]!;
       if (p.life <= 0) {
         this.dummy.position.set(0, -1000, 0);

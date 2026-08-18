@@ -536,7 +536,7 @@ export const WEAPONS: readonly WeaponSpec[] = [
     mount: 'front-vertical',
     massKg: 34,
     rotorMassKg: 26,
-    radiusM: 0.36,
+    radiusM: 0.3,
     rpm: 2400,
     powerW: 5400,
     rimFraction: 0.8,
