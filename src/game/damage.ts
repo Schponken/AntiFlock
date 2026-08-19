@@ -1,0 +1,380 @@
+/**
+ * The damage model.
+ *
+ * Everything here is bookkeeping in joules. A weapon carries kinetic energy; a
+ * collision transfers some fraction of it; the fraction that transfers is
+ * subtracted from the attacker's rotor *and* from the defender's structure. That
+ * single shared currency is what makes a big hit slow the spinner down, throw both
+ * machines apart, and blow a panel off, all from the same number.
+ */
+
+import { clamp, clamp01 } from '../core/mathx.ts';
+import type { DerivedStats } from './design.ts';
+import type { MaterialSpec } from './parts.ts';
+
+export type PartKind = 'frame' | 'armor' | 'wheel' | 'weapon' | 'srimech';
+
+export type ArmorFace = 'front' | 'rear' | 'left' | 'right' | 'top' | 'bottom';
+
+export interface PartState {
+  id: string;
+  kind: PartKind;
+  label: string;
+  hp: number;
+  maxHp: number;
+  destroyed: boolean;
+  /** Cumulative energy absorbed, used to drive progressive visual denting. */
+  absorbed: number;
+  /** Armour panels only. */
+  face?: ArmorFace;
+  /** Wheels only: which drive index this part powers. */
+  wheelIndex?: number;
+  /** Panels that can physically fall off and become debris. */
+  detachable: boolean;
+}
+
+export interface HitInput {
+  /** Energy available in the strike, joules. */
+  energy: number;
+  /** Weapon damage multiplier from the parts catalogue. */
+  bite: number;
+  /** 0 = glancing graze, 1 = dead-square hit. */
+  squareness: number;
+  /** The surface being struck. */
+  targetMaterial: MaterialSpec;
+  /** Part taking the hit. */
+  part: PartState;
+}
+
+export interface HitResult {
+  /** Energy actually removed from the attacker, joules. */
+  energyTransferred: number;
+  /** Structural integrity consumed, joules. */
+  damage: number;
+  destroyed: boolean;
+  /** 0-1, for sparks, screen shake and commentary. */
+  severity: number;
+  part: PartState;
+}
+
+/** Below this, a contact is a scrape and produces no damage event at all. */
+export const MIN_DAMAGING_ENERGY = 45;
+
+/**
+ * Fraction of the incoming energy that couples into the target.
+ *
+ * Slippery, ductile armour (UHMW, HDPE) sheds a glancing weapon; hard brittle
+ * armour (tool steel, carbon) has nowhere to put the energy and takes it all.
+ */
+export function transferFraction(
+  squareness: number,
+  targetMaterial: MaterialSpec,
+  bite: number,
+): number {
+  const grabbiness = clamp(targetMaterial.friction * 1.45, 0.18, 1);
+  const brittleness = 1 - targetMaterial.ductility * 0.62;
+  const square = clamp01(squareness);
+  return clamp(0.06 + 0.52 * square * grabbiness * brittleness * clamp(bite, 0.1, 2), 0.03, 0.68);
+}
+
+/** Apply one strike to one part. Mutates the part and reports what happened. */
+export function resolveHit(input: HitInput): HitResult {
+  const { energy, bite, squareness, targetMaterial, part } = input;
+  const fraction = transferFraction(squareness, targetMaterial, bite);
+  const energyTransferred = Math.max(0, energy) * fraction;
+  const damage = energyTransferred * clamp(bite, 0.1, 2);
+
+  const before = part.hp;
+  part.hp = Math.max(0, part.hp - damage);
+  part.absorbed += energyTransferred;
+  const consumed = before - part.hp;
+  const destroyed = !part.destroyed && part.hp <= 0;
+  if (destroyed) part.destroyed = true;
+
+  // Severity is what the audience feels: a hit that eats a big slice of what was
+  // left is a big hit, regardless of the absolute joules.
+  const severity = clamp01(consumed / Math.max(1, part.maxHp * 0.28));
+
+  return { energyTransferred, damage: consumed, destroyed, severity, part };
+}
+
+// ---------------------------------------------------------------------------
+// Whole-bot damage state
+// ---------------------------------------------------------------------------
+
+/** Seconds of no meaningful movement before the referee counts a bot out. */
+export const IMMOBILITY_COUNT_SECONDS = 10;
+
+/** A bot moving slower than this is considered not moving. */
+export const IMMOBILE_SPEED = 0.35;
+
+export interface BotDamageSnapshot {
+  /** 0-1 across every part, weighted by max HP. */
+  integrity: number;
+  /** 0-1 fraction of drive still working. */
+  mobility: number;
+  /** 0-1 weapon condition; 0 means the weapon is dead. */
+  weaponCondition: number;
+  frameIntegrity: number;
+  armorIntegrity: number;
+  destroyedParts: string[];
+  immobileFor: number;
+  countedOut: boolean;
+}
+
+export class BotDamage {
+  readonly parts: PartState[] = [];
+  private byId = new Map<string, PartState>();
+  private immobileTimer = 0;
+  private _countedOut = false;
+  private _totalDamageTaken = 0;
+
+  constructor(stats: DerivedStats) {
+    const { chassis } = stats.parts;
+
+    this.add({
+      id: 'frame',
+      kind: 'frame',
+      label: 'Frame',
+      hp: stats.frameHp,
+      maxHp: stats.frameHp,
+      destroyed: false,
+      absorbed: 0,
+      detachable: false,
+    });
+
+    // Armour HP is split across faces. The front takes the beating in a real
+    // fight, so it gets the biggest share of the plate.
+    const faceShare: Record<ArmorFace, number> = {
+      front: 0.3,
+      left: 0.18,
+      right: 0.18,
+      rear: 0.14,
+      top: 0.12,
+      bottom: 0.08,
+    };
+    for (const [face, share] of Object.entries(faceShare) as [ArmorFace, number][]) {
+      const hp = stats.armorHp * share;
+      this.add({
+        id: `armor-${face}`,
+        kind: 'armor',
+        label: `${face[0]!.toUpperCase()}${face.slice(1)} armour`,
+        hp,
+        maxHp: hp,
+        destroyed: false,
+        absorbed: 0,
+        face,
+        detachable: true,
+      });
+    }
+
+    const wheelHp = stats.parts.wheel.toughness;
+    for (let i = 0; i < stats.wheelCount; i++) {
+      this.add({
+        id: `wheel-${i}`,
+        kind: 'wheel',
+        label: `Wheel ${i + 1}`,
+        hp: wheelHp,
+        maxHp: wheelHp,
+        destroyed: false,
+        absorbed: 0,
+        wheelIndex: i,
+        detachable: true,
+      });
+    }
+
+    // The weapon assembly is as tough as the frame it is bolted to, scaled by
+    // how much metal is actually in it.
+    const weaponHp = Math.max(4000, stats.weaponMass * 900 + stats.frameHp * 0.25);
+    this.add({
+      id: 'weapon',
+      kind: 'weapon',
+      label: stats.parts.weapon.name,
+      hp: weaponHp,
+      maxHp: weaponHp,
+      destroyed: false,
+      absorbed: 0,
+      detachable: false,
+    });
+
+    if (stats.hasSrimech) {
+      const hp = chassis.frameIntegrity * 0.18;
+      this.add({
+        id: 'srimech',
+        kind: 'srimech',
+        label: 'Self-righter',
+        hp,
+        maxHp: hp,
+        destroyed: false,
+        absorbed: 0,
+        detachable: false,
+      });
+    }
+  }
+
+  private add(part: PartState): void {
+    this.parts.push(part);
+    this.byId.set(part.id, part);
+  }
+
+  get(id: string): PartState | undefined {
+    return this.byId.get(id);
+  }
+
+  get totalDamageTaken(): number {
+    return this._totalDamageTaken;
+  }
+
+  /** Armour on the given face, falling back to the frame once that panel is gone. */
+  partForFace(face: ArmorFace): PartState {
+    const armor = this.byId.get(`armor-${face}`);
+    if (armor && !armor.destroyed) return armor;
+    return this.byId.get('frame')!;
+  }
+
+  hit(input: Omit<HitInput, 'part'> & { part: PartState }): HitResult {
+    const result = resolveHit(input);
+    this._totalDamageTaken += result.damage;
+    return result;
+  }
+
+  /** Fraction of drive still turning. Losing wheels on one side hurts more. */
+  get mobility(): number {
+    const wheels = this.parts.filter((p) => p.kind === 'wheel');
+    if (wheels.length === 0) return 1;
+    const alive = wheels.filter((w) => !w.destroyed).length;
+    return alive / wheels.length;
+  }
+
+  get weaponCondition(): number {
+    const weapon = this.byId.get('weapon');
+    if (!weapon) return 0;
+    return weapon.destroyed ? 0 : clamp01(weapon.hp / weapon.maxHp);
+  }
+
+  get srimechWorks(): boolean {
+    const s = this.byId.get('srimech');
+    return !!s && !s.destroyed;
+  }
+
+  get frameIntegrity(): number {
+    const frame = this.byId.get('frame')!;
+    return clamp01(frame.hp / frame.maxHp);
+  }
+
+  get armorIntegrity(): number {
+    const panels = this.parts.filter((p) => p.kind === 'armor');
+    if (panels.length === 0) return 0;
+    const max = panels.reduce((s, p) => s + p.maxHp, 0);
+    const hp = panels.reduce((s, p) => s + p.hp, 0);
+    return max > 0 ? clamp01(hp / max) : 0;
+  }
+
+  /** Weighted health across the whole machine, 0-1. */
+  get integrity(): number {
+    const max = this.parts.reduce((s, p) => s + p.maxHp, 0);
+    if (max <= 0) return 0;
+    const hp = this.parts.reduce((s, p) => s + p.hp, 0);
+    return clamp01(hp / max);
+  }
+
+  get countedOut(): boolean {
+    return this._countedOut;
+  }
+
+  get immobileFor(): number {
+    return this.immobileTimer;
+  }
+
+  /**
+   * Advance the referee's immobility count. `speed` is the bot's ground speed and
+   * `weaponActive` covers the rule that visible weapon movement keeps you alive.
+   */
+  tickMobility(dt: number, speed: number, weaponActive: boolean): void {
+    const showingMovement = speed > IMMOBILE_SPEED || weaponActive;
+    if (showingMovement) {
+      this.immobileTimer = 0;
+    } else {
+      this.immobileTimer += dt;
+      if (this.immobileTimer >= IMMOBILITY_COUNT_SECONDS) this._countedOut = true;
+    }
+  }
+
+  /** Force the count, e.g. when a bot leaves the box or the frame folds. */
+  countOut(): void {
+    this._countedOut = true;
+    this.immobileTimer = IMMOBILITY_COUNT_SECONDS;
+  }
+
+  /** A bot with no drive and no weapon is done, count or no count. */
+  get isDead(): boolean {
+    return this._countedOut || (this.mobility <= 0 && this.weaponCondition <= 0);
+  }
+
+  snapshot(): BotDamageSnapshot {
+    return {
+      integrity: this.integrity,
+      mobility: this.mobility,
+      weaponCondition: this.weaponCondition,
+      frameIntegrity: this.frameIntegrity,
+      armorIntegrity: this.armorIntegrity,
+      destroyedParts: this.parts.filter((p) => p.destroyed).map((p) => p.id),
+      immobileFor: this.immobileTimer,
+      countedOut: this._countedOut,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Judging
+// ---------------------------------------------------------------------------
+
+/**
+ * Judges score damage, aggression and control. This mirrors the real 5-3-3 split:
+ * damage is worth the most, then aggression and control equally.
+ */
+export interface JudgeTally {
+  damage: number;
+  aggression: number;
+  control: number;
+}
+
+export const JUDGE_WEIGHTS = { damage: 5, aggression: 3, control: 3 } as const;
+
+export interface JudgeCard {
+  damage: [number, number];
+  aggression: [number, number];
+  control: [number, number];
+  total: [number, number];
+  winner: 0 | 1;
+  unanimous: boolean;
+}
+
+const splitPoints = (a: number, b: number, points: number): [number, number] => {
+  const total = a + b;
+  if (total <= 1e-6) {
+    const half = points / 2;
+    return [half, half];
+  }
+  // The category is never a straight ratio: a clear edge takes almost all of it.
+  const share = a / total;
+  const skewed = share ** 1.6 / (share ** 1.6 + (1 - share) ** 1.6);
+  return [points * skewed, points * (1 - skewed)];
+};
+
+export function scoreJudges(a: JudgeTally, b: JudgeTally): JudgeCard {
+  const damage = splitPoints(a.damage, b.damage, JUDGE_WEIGHTS.damage);
+  const aggression = splitPoints(a.aggression, b.aggression, JUDGE_WEIGHTS.aggression);
+  const control = splitPoints(a.control, b.control, JUDGE_WEIGHTS.control);
+
+  const total: [number, number] = [
+    damage[0] + aggression[0] + control[0],
+    damage[1] + aggression[1] + control[1],
+  ];
+  const winner: 0 | 1 = total[0] >= total[1] ? 0 : 1;
+  const categoriesWonByWinner = [damage, aggression, control].filter((c) =>
+    winner === 0 ? c[0] >= c[1] : c[1] > c[0],
+  ).length;
+
+  return { damage, aggression, control, total, winner, unanimous: categoriesWonByWinner === 3 };
+}

@@ -1,0 +1,45 @@
+{
+  "name": "antiflock",
+  "version": "1.0.0",
+  "description": "AntiFlock — a 3D physics battle bots combat simulator with full bot customisation, realistic collision + damage, and a show-accurate fight-night start sequence.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Schponken/AntiFlock.git"
+  },
+  "keywords": [
+    "battlebots",
+    "three.js",
+    "rapier",
+    "physics",
+    "game",
+    "webgl"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Schponken/AntiFlock/issues"
+  },
+  "homepage": "https://github.com/Schponken/AntiFlock#readme",
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.20.0",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.2.0",
+    "@types/three": "^0.185.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}
