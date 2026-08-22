@@ -440,8 +440,11 @@ export function chamferedPlate(
   const hw = width / 2 - chamfer;
   const hh = height / 2 - chamfer;
   const shape = new THREE.Shape();
-  shape.moveTo(-hw, -height / 2 + chamfer * 0);
-  shape.lineTo(hw, -hh - chamfer * 0);
+  // Both bottom corners at -height/2. The stray `* 0` on the second term put the
+  // bottom-right one a chamfer higher and made its own chamfer degenerate, so the
+  // "octagon" was lopsided on every plate in the game.
+  shape.moveTo(-hw, -height / 2);
+  shape.lineTo(hw, -height / 2);
   shape.lineTo(width / 2, -hh);
   shape.lineTo(width / 2, hh);
   shape.lineTo(hw, height / 2);

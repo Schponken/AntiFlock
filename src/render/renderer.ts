@@ -14,6 +14,12 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { clamp, damp } from '../core/mathx.ts';
+
+/** Frames longer than this are stalls, and are kept out of the frame-time average. */
+const HITCH_SECONDS = 0.2;
+
+/** Time constant of the frame-time average, in seconds. */
+const FRAME_AVERAGE_SECONDS = 1;
 import {
   detectSoftwareRenderer,
   getRenderProfile,
@@ -35,6 +41,8 @@ export class Stage {
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private renderPass: RenderPass | null = null;
+  /** Consecutive four-second windows spent over the frame budget. */
+  private overBudgetWindows = 0;
   private camera: THREE.PerspectiveCamera | null = null;
   private quality: QualityLevel;
   /** Current and target extra bloom strength, eased in `render`. */
@@ -149,11 +157,29 @@ export class Stage {
     this.buildComposer();
   }
 
-  private buildComposer(): void {
-    if (!this.camera) return;
-    this.composer?.dispose();
+  /**
+   * Free the whole post chain, passes included.
+   *
+   * `EffectComposer.dispose()` frees only its own two render targets and its copy
+   * pass — it never walks `this.passes`. `UnrealBloomPass` holds five horizontal
+   * mips, five vertical mips and a brightness target plus its materials, and has a
+   * `dispose()` of its own that nothing was calling, so every graphics-setting
+   * change stranded eleven render targets on the GPU.
+   */
+  private disposeComposer(): void {
+    if (!this.composer) return;
+    for (const pass of this.composer.passes) {
+      (pass as { dispose?: () => void }).dispose?.();
+    }
+    this.composer.dispose();
     this.composer = null;
     this.bloomPass = null;
+    this.renderPass = null;
+  }
+
+  private buildComposer(): void {
+    if (!this.camera) return;
+    this.disposeComposer();
 
     if (!getRenderProfile().bloom) return;
 
@@ -262,21 +288,43 @@ export class Stage {
   }
 
   /**
-   * Drop quality if we are consistently missing frames. Only ever steps down —
-   * hunting up and down mid-fight is more distracting than a slightly soft image.
+   * Drop quality if we are consistently missing frames.
+   *
+   * The average has to be weighted by *time*, not by frame. Weighting every frame
+   * equally at 0.06 meant one long frame — and `main.ts` lets a frame run to half
+   * a second before clamping — contributed 30 ms in a single step, which is enough
+   * on its own to push a steady 60 fps average over the threshold. Alt-tabbing
+   * away, a garbage-collection pause or a texture upload therefore cost a graphics
+   * tier permanently. Hitches are stalls, not sustained load, so they are dropped
+   * from the average entirely, and a tier now needs two consecutive over-budget
+   * windows before it goes.
+   *
+   * It only ever steps down: hunting up and down mid-fight is more distracting
+   * than a slightly soft image.
    */
   private adapt(dt: number): void {
-    this.frameMs = this.frameMs * 0.94 + dt * 1000 * 0.06;
+    // A frame this long is a stall. It says nothing about how fast we can render.
+    if (dt < HITCH_SECONDS) {
+      const k = 1 - Math.exp(-dt / FRAME_AVERAGE_SECONDS);
+      this.frameMs += (dt * 1000 - this.frameMs) * k;
+    }
     this.sinceAdapt += dt;
     if (this.sinceAdapt < 4) return;
     this.sinceAdapt = 0;
 
-    if (this.frameMs > 34 && this.quality === 'high') this.setQuality('medium');
-    else if (this.frameMs > 42 && this.quality === 'medium') this.setQuality('low');
+    const overBudget =
+      (this.quality === 'high' && this.frameMs > 34) ||
+      (this.quality === 'medium' && this.frameMs > 42);
+    this.overBudgetWindows = overBudget ? this.overBudgetWindows + 1 : 0;
+    if (this.overBudgetWindows < 2) return;
+    this.overBudgetWindows = 0;
+
+    if (this.quality === 'high') this.setQuality('medium');
+    else if (this.quality === 'medium') this.setQuality('low');
   }
 
   dispose(): void {
-    this.composer?.dispose();
+    this.disposeComposer();
     this.envTexture?.dispose();
     this.renderer.dispose();
   }

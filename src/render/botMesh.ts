@@ -175,14 +175,24 @@ function addTeeth(
        */
       tooth.rotation.x = angle;
       tooth.rotation.y = Math.PI / 4;
-      bolts.push({
-        position: new THREE.Vector3(
-          size * 1.1,
-          Math.cos(angle) * radius * 0.92,
-          Math.sin(angle) * radius * 0.92,
-        ),
-        normal: new THREE.Vector3(1, 0, 0),
-      });
+      /*
+       * The bolt sits on the tooth's face, not out in the air past it.
+       *
+       * `size * 1.1` was a guess: a 4-segment prism rolled 45 degrees only reaches
+       * `size * cos(45)` across its flats, so a 25 mm bolt head floated 11.8 mm
+       * clear of the part it was supposed to be retaining. Real bolt-on teeth are
+       * through-bolted, so both faces get a head.
+       */
+      for (const facing of [1, -1] as const) {
+        bolts.push({
+          position: new THREE.Vector3(
+            facing * size * Math.SQRT1_2,
+            Math.cos(angle) * radius * 0.92,
+            Math.sin(angle) * radius * 0.92,
+          ),
+          normal: new THREE.Vector3(facing, 0, 0),
+        });
+      }
     } else {
       tooth.position.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
       tooth.rotation.z = angle + Math.PI / 2;
@@ -190,7 +200,7 @@ function addTeeth(
       bolts.push({
         position: new THREE.Vector3(
           Math.cos(angle) * radius * 0.9,
-          size * 1.1,
+          size * Math.SQRT1_2,
           Math.sin(angle) * radius * 0.9,
         ),
         normal: new THREE.Vector3(0, 1, 0),
@@ -288,8 +298,11 @@ function buildRotor(
         const tip = new THREE.Mesh(tipGeom, material);
         if (axis === 'y') {
           tip.position.set(sign * (span / 2 - span * 0.045), 0, 0);
-          tip.rotation.z = sign > 0 ? -Math.PI / 2 : Math.PI / 2;
-          tip.rotation.y = Math.PI / 4;
+          // Rz lays the tip along X, which is the bar's own axis; the roll then
+          // has to be about X too. With Three's XYZ order Ry is applied *before*
+          // Rz, so it acted on the untransformed part and swung the tip 45 degrees
+          // out of the bar — the same Euler-order trap the drum teeth had.
+          tip.rotation.set(Math.PI / 4, 0, sign > 0 ? -Math.PI / 2 : Math.PI / 2);
           tipBolts.push({
             position: new THREE.Vector3(sign * span * 0.4, thickness * 0.6, 0),
             normal: new THREE.Vector3(0, 1, 0),
@@ -885,6 +898,26 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
   // Y reverses it — which does not matter here, because the arches are symmetric.
   const wheelArches: [number, number][] = wheelZ.map((z) => [z, wheel.radius + 0.012]);
 
+  /*
+   * The weapon slot.
+   *
+   * A vertical rotor is hung at the nose and rises above the deck, so its envelope
+   * genuinely passes through the front plate and the top deck — measured, 76 cm3
+   * of solid disc inside the front plate and 29 cm3 inside the top one. Real
+   * machines cut a slot for it. Both plates run their local X along chassis X, so
+   * one opening centred on the machine's centreline serves both.
+   */
+  const mount = chassis.weaponMount;
+  const rotorHalfWidth = weapon.rotor
+    ? (weapon.rotor.shape === 'disc' ? weapon.rotor.thickness : weapon.rotor.span) / 2 + 0.014
+    : 0;
+  const verticalRotor = weapon.rotor?.axis === 'x';
+  const rotorReach = weapon.rotor?.radius ?? 0;
+  const frontSlot: [number, number][] =
+    verticalRotor && mount.z + rotorReach > hl ? [[0, rotorHalfWidth]] : [];
+  const topSlot: [number, number][] =
+    verticalRotor && mount.y + rotorReach > hh ? [[0, rotorHalfWidth]] : [];
+
   // Panels are inset so the frame rails and corner posts stay visible around
   // them. That gap is the whole difference between "a painted box" and "plate
   // bolted into a welded frame".
@@ -897,6 +930,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       position: [0, 0, hl + plate / 2],
       rotation: [0, 0, 0],
       normal: new THREE.Vector3(0, 0, 1),
+      cutouts: frontSlot,
     },
     {
       face: 'rear',
@@ -931,6 +965,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       position: [0, hh + plate / 2, 0],
       rotation: [-Math.PI / 2, 0, 0],
       normal: new THREE.Vector3(0, 1, 0),
+      cutouts: topSlot,
     },
     {
       face: 'bottom',
@@ -955,36 +990,51 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
     panel.receiveShadow = true;
     panel.name = `armor-${def.face}`;
 
-    // Fasteners around the perimeter, in the panel's own local frame.
-    const insetX = def.width / 2 - Math.max(0.022, plate * 1.6);
-    const insetY = def.height / 2 - Math.max(0.022, plate * 1.6);
+    /*
+     * Fasteners around the perimeter of each surviving *segment*.
+     *
+     * Derived from the panel's uncut outline, the rows ran straight across the
+     * openings: sixteen bolts per machine floated in the wheel arches, and two of
+     * them sat inside the solid of a tyre. Bolting each segment to its own edges
+     * is also what a fabricator would do — every piece of plate needs its own
+     * fixings.
+     */
+    const edge = Math.max(0.022, plate * 1.6);
+    const insetY = def.height / 2 - edge;
     const boltNormal = new THREE.Vector3(0, 0, 1);
-    const perimeter: BoltPlacement[] = [
-      ...rowPlacements({
-        count: 4,
-        from: new THREE.Vector3(-insetX, insetY, plate / 2),
-        to: new THREE.Vector3(insetX, insetY, plate / 2),
-        normal: boltNormal,
-      }),
-      ...rowPlacements({
-        count: 4,
-        from: new THREE.Vector3(-insetX, -insetY, plate / 2),
-        to: new THREE.Vector3(insetX, -insetY, plate / 2),
-        normal: boltNormal,
-      }),
-      ...rowPlacements({
-        count: 2,
-        from: new THREE.Vector3(-insetX, -insetY * 0.4, plate / 2),
-        to: new THREE.Vector3(-insetX, insetY * 0.4, plate / 2),
-        normal: boltNormal,
-      }),
-      ...rowPlacements({
-        count: 2,
-        from: new THREE.Vector3(insetX, -insetY * 0.4, plate / 2),
-        to: new THREE.Vector3(insetX, insetY * 0.4, plate / 2),
-        normal: boltNormal,
-      }),
-    ];
+    const perimeter: BoltPlacement[] = [];
+    for (const [from, to] of panelSpans(def.width, plate, def.cutouts)) {
+      const left = from + edge;
+      const right = to - edge;
+      if (right <= left) continue;
+      const across = Math.max(2, Math.min(4, Math.round((to - from) / 0.12)));
+      perimeter.push(
+        ...rowPlacements({
+          count: across,
+          from: new THREE.Vector3(left, insetY, plate / 2),
+          to: new THREE.Vector3(right, insetY, plate / 2),
+          normal: boltNormal,
+        }),
+        ...rowPlacements({
+          count: across,
+          from: new THREE.Vector3(left, -insetY, plate / 2),
+          to: new THREE.Vector3(right, -insetY, plate / 2),
+          normal: boltNormal,
+        }),
+        ...rowPlacements({
+          count: 2,
+          from: new THREE.Vector3(left, -insetY * 0.4, plate / 2),
+          to: new THREE.Vector3(left, insetY * 0.4, plate / 2),
+          normal: boltNormal,
+        }),
+        ...rowPlacements({
+          count: 2,
+          from: new THREE.Vector3(right, -insetY * 0.4, plate / 2),
+          to: new THREE.Vector3(right, insetY * 0.4, plate / 2),
+          normal: boltNormal,
+        }),
+      );
+    }
     const cluster = boltCluster(registry, boltGeom, hardwareMat, perimeter);
     if (cluster) panel.add(cluster);
 
@@ -1022,14 +1072,22 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
   }
 
   if (stats.parts.accessories.includes('skirts')) {
+    /*
+     * Sized from the actual ride height rather than from a fraction of the frame.
+     * A skirt is a strip that hangs down to the floor to stop a wedge getting
+     * under you; sized at 40% of the chassis height it hung 79 mm *below* the
+     * floor the wheels were standing on, on every frame in the catalogue.
+     */
+    const skirtHeight = chassis.groundClearance + 0.012;
     const geom = chamferedPlate(registry, {
       width: chassis.length * 0.9,
-      height: chassis.height * 0.4,
+      height: skirtHeight,
       thickness: 0.008,
     });
     for (const sign of [-1, 1]) {
       const skirt = new THREE.Mesh(geom, machinedMat);
-      skirt.position.set(sign * (hw + plate + 0.006), -hh - chassis.height * 0.12, 0);
+      // Bottom edge lands on the floor line: -(height/2 + groundClearance).
+      skirt.position.set(sign * (hw + plate + 0.006), -hh - chassis.groundClearance + skirtHeight / 2 - 0.006, 0);
       skirt.rotation.y = (sign * Math.PI) / 2;
       skirt.castShadow = true;
       body.add(skirt);
@@ -1071,6 +1129,14 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
   const wheels: THREE.Object3D[] = [];
   for (let i = 0; i < chassis.wheelCount; i++) {
     const group = new THREE.Group();
+    /*
+     * Which way this corner faces. One wheel was built and reused for both sides,
+     * so the drive sprocket sat inboard on the right-hand wheels and *outboard* of
+     * the tyre on the left-hand ones — a chain run to the outside face of a wheel,
+     * on every machine in the game. The hub bolts were mirrored the same way,
+     * hidden behind the tyre on one side.
+     */
+    const outboard = i % 2 === 0 ? -1 : 1;
 
     const tyreMesh = new THREE.Mesh(tyreGeom, tyreMat);
     tyreMesh.rotation.z = Math.PI / 2;
@@ -1096,7 +1162,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
 
     // Drive sprocket on the inboard face.
     const sprocketMesh = new THREE.Mesh(sprocket, hardwareMat);
-    sprocketMesh.position.x = -wheel.width * 0.62;
+    sprocketMesh.position.x = -outboard * wheel.width * 0.62;
     group.add(sprocketMesh);
 
     const cluster = boltCluster(
@@ -1107,8 +1173,8 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
         count: 5,
         radius: wheel.radius * 0.34,
         axis: 'x',
-        offset: wheel.width * 0.54,
-        facing: 1,
+        offset: outboard * wheel.width * 0.54,
+        facing: outboard as 1 | -1,
       }),
     );
     if (cluster) group.add(cluster);
@@ -1127,7 +1193,6 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
     weaponPivot.add(weaponGroup);
     root.add(weaponPivot);
 
-    const mount = chassis.weaponMount;
     const axis = weapon.rotor.axis;
 
     if (axis === 'x') {
@@ -1137,26 +1202,64 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
        */
       const standoff = chassis.width * 0.42;
 
+      /*
+       * The post has to stand under the bearing it carries.
+       *
+       * The uprights sat at 70% of the mount's z, inside the shell, while the
+       * pillow blocks were out at the mount — a 73 mm gap in Z between each block
+       * and the post that is supposed to hold it, with the block hanging in mid
+       * air. There was also no shaft at all: a 212 mm run of nothing between the
+       * rotor hub and the bearing bore. Put the post under the block, brace it
+       * back to the frame, and run a real shaft through both.
+       */
+      const uprightHeight = mount.y + chassis.height * 0.5;
+      const stayLength = Math.max(0.04, Math.abs(mount.z) - chassis.length * 0.32);
       for (const sign of [-1, 1]) {
         const upright = new THREE.Mesh(
-          registry.geometry(new THREE.BoxGeometry(0.032, chassis.height * 0.75, 0.055)),
+          registry.geometry(new THREE.BoxGeometry(0.032, uprightHeight, 0.055)),
           frameMat,
         );
-        upright.position.set(sign * standoff, mount.y * 0.35, mount.z * 0.7);
+        upright.position.set(sign * standoff, mount.y - uprightHeight / 2, mount.z);
         upright.castShadow = true;
         body.add(upright);
+
+        // Diagonal stay back into the frame, so the post is not a cantilever.
+        const stay = new THREE.Mesh(
+          registry.geometry(new THREE.BoxGeometry(0.028, 0.028, stayLength)),
+          frameMat,
+        );
+        stay.position.set(
+          sign * standoff,
+          mount.y - uprightHeight * 0.75,
+          mount.z - Math.sign(mount.z || 1) * stayLength * 0.5,
+        );
+        body.add(stay);
 
         const block = pillowBlock(registry, machinedMat, { bore: 0.017, width: 0.05 });
         block.position.set(sign * standoff, mount.y, mount.z);
         body.add(block);
       }
 
+      // The shaft the rotor is keyed to, running out through both bearings.
+      const shaft = new THREE.Mesh(
+        registry.geometry(
+          new THREE.CylinderGeometry(0.016, 0.016, standoff * 2 + 0.06, 14),
+        ),
+        machinedMat,
+      );
+      shaft.rotation.z = Math.PI / 2;
+      shaft.position.set(0, mount.y, mount.z);
+      shaft.castShadow = true;
+      body.add(shaft);
+
       const rotorPulleyRadius = Math.max(0.03, weapon.rotor.radius * 0.2);
       const motorPulleyRadius = rotorPulleyRadius * 0.5;
       const beltSpan = 0.24;
 
       const beltGroup = new THREE.Group();
-      beltGroup.position.set(standoff + 0.05, mount.y, mount.z);
+      // Outboard of the side plate, not through it: the drive used to straddle the
+      // armour, with the belt and motor pulley half inside the panel.
+      beltGroup.position.set(Math.max(standoff + 0.05, hw + plate + 0.03), mount.y, mount.z);
       // Turn the band so it is extruded along the rotor's spin axis.
       beltGroup.rotation.y = Math.PI / 2;
 
@@ -1190,7 +1293,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       body.add(beltGroup);
 
       const weaponMotor = motorCan(registry, hardwareMat, { radius: 0.042, length: 0.15 });
-      weaponMotor.position.set(standoff * 0.5, mount.y - 0.07, mount.z - beltSpan);
+      weaponMotor.position.set(standoff * 0.55, mount.y - 0.07, mount.z - beltSpan);
       body.add(weaponMotor);
     } else {
       /*
@@ -1308,6 +1411,32 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
  * single part. Segments too narrow to be worth bolting on are dropped, which is
  * also the right answer for a six-wheel frame with no room between the rows.
  */
+export function panelSpans(
+  width: number,
+  thickness: number,
+  cutouts?: [number, number][],
+): [number, number][] {
+  const half = width / 2;
+  if (!cutouts || cutouts.length === 0) return [[-half, half]];
+
+  // Walk the panel from one edge to the other, skipping every opening.
+  const openings = [...cutouts].sort((a, b) => a[0] - b[0]);
+  const spans: [number, number][] = [];
+  let cursor = -half;
+  for (const [centre, radius] of openings) {
+    const from = centre - radius;
+    const to = centre + radius;
+    if (from > cursor) spans.push([cursor, Math.min(from, half)]);
+    cursor = Math.max(cursor, to);
+  }
+  if (cursor < half) spans.push([cursor, half]);
+
+  const minimum = Math.max(0.03, thickness * 4);
+  const kept = spans.filter(([from, to]) => to - from >= minimum);
+  // A frame whose openings leave nothing worth plating still needs *a* panel.
+  return kept.length > 0 ? kept : [[-half, half]];
+}
+
 export function panelGeometry(
   registry: GeometryRegistry,
   width: number,
@@ -1319,32 +1448,24 @@ export function panelGeometry(
     chamferedPlate(registry, { width: w, height, thickness });
   if (!cutouts || cutouts.length === 0) return plain(width);
 
-  // Walk the panel from one edge to the other, skipping every arch.
-  const half = width / 2;
-  const arches = [...cutouts].sort((a, b) => a[0] - b[0]);
-  const spans: [number, number][] = [];
-  let cursor = -half;
-  for (const [centre, radius] of arches) {
-    const from = centre - radius;
-    const to = centre + radius;
-    if (from > cursor) spans.push([cursor, Math.min(from, half)]);
-    cursor = Math.max(cursor, to);
-  }
-  if (cursor < half) spans.push([cursor, half]);
-
-  const minimum = Math.max(0.03, thickness * 4);
+  const spans = panelSpans(width, thickness, cutouts);
   const pieces: THREE.BufferGeometry[] = [];
   for (const [from, to] of spans) {
-    const w = to - from;
-    if (w < minimum) continue;
-    const piece = plain(w).clone();
+    const piece = plain(to - from).clone();
     piece.translate((from + to) / 2, 0, 0);
     pieces.push(piece);
   }
 
-  // A frame whose wheels leave nothing worth plating still needs *a* panel: fall
-  // back to the solid plate rather than handing back an empty part.
-  if (pieces.length === 0) return plain(width);
-  if (pieces.length === 1) return pieces[0]!;
-  return mergeGeometries(pieces);
+  /*
+   * Register what is actually handed back, and free the intermediates.
+   *
+   * `plain()` returns a registered plate, but the clone of it and the merged
+   * result are new objects the registry has never seen — so teardown freed the
+   * originals, which were never rendered, and left every side panel in the game
+   * resident on the GPU for the lifetime of the page.
+   */
+  if (pieces.length === 1) return registry.geometry(pieces[0]!);
+  const merged = mergeGeometries(pieces);
+  for (const piece of pieces) piece.dispose();
+  return registry.geometry(merged);
 }

@@ -19,6 +19,7 @@ import {
   WEAPONS,
   WEIGHT_LIMIT_KG,
   WHEELS,
+  weaponById,
   type AccessoryEffect,
   type DecalId,
 } from '../game/parts.ts';
@@ -437,7 +438,27 @@ export class Builder {
       );
     }
 
-    this.optionsPane.append(el('h4', { class: 'section', text: 'Weapon material' }));
+    /*
+     * Only offer a rotor material when there is a rotor.
+     *
+     * `rotorMass` returns 0 for a weapon with no rotor, so for the flipper, the
+     * hammer, the crusher and the wedge every one of the eight cards produced a
+     * byte-identical build — same mass, same cost, same energy, same everything.
+     * Eight choices that cannot be distinguished is worse than no choice, because
+     * the player spends time on it.
+     */
+    const weapon = weaponById(this.design.weaponId);
+    if (!weapon.rotor) {
+      this.optionsPane.append(
+        el('p', {
+          class: 'muted',
+          text: `A ${weapon.name.toLowerCase()} has no rotor, so there is no rotor material to choose.`,
+        }),
+      );
+      return;
+    }
+
+    this.optionsPane.append(el('h4', { class: 'section', text: 'Rotor material' }));
     for (const material of MATERIALS) {
       this.optionsPane.append(
         this.optionCard({

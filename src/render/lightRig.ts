@@ -255,10 +255,19 @@ export class LightRig {
 
       const material = searchlight.beam.material as THREE.MeshBasicMaterial;
       material.opacity = this.sweepLevel * 0.09;
-      // Point the visible cone down the same axis as the light.
+      /*
+       * Move the cone to the fixture *before* aiming it.
+       *
+       * `lookAt` builds the orientation from the object's current position, and at
+       * this point that is still last frame's — the fixture position translated
+       * eight metres down the previous beam axis. Aiming from a point out on the
+       * floor rather than from the lamp put the visible cone up to 60 degrees off
+       * the light it is supposed to be showing, so the bright patch on the floor
+       * and the shaft of haze pointing at it were unrelated.
+       */
+      searchlight.beam.position.copy(searchlight.light.position);
       searchlight.beam.lookAt(searchlight.light.target.position);
       searchlight.beam.rotateX(-Math.PI / 2);
-      searchlight.beam.position.copy(searchlight.light.position);
       searchlight.beam.translateY(-8);
     }
 

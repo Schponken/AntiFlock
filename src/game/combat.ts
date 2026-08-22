@@ -462,7 +462,15 @@ export class Combat {
       const height = worldPoint.y - t.y;
       const lowHit = height < -bot.stats.parts.chassis.height * 0.18;
       const sideHit = face === 'left' || face === 'right' || face === 'bottom';
-      if (lowHit && sideHit && fxRng.bool(0.55)) {
+      /*
+       * Armoured skirts are what they are for: a strip of plate hanging down the
+       * side to stop a weapon getting under the machine and into the wheels. The
+       * accessory used to add 6.2 kg and a decorative mesh and nothing else — the
+       * damage model could not see it at all — which made it a trap rather than a
+       * choice.
+       */
+      const skirted = bot.stats.parts.accessories.includes('skirts');
+      if (lowHit && sideHit && fxRng.bool(skirted ? 0.18 : 0.55)) {
         return fxRng.pick(wheels);
       }
     }

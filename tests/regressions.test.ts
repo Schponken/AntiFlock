@@ -9,6 +9,7 @@
 
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import * as THREE from 'three';
+import { clamp } from '../src/core/mathx.ts';
 import { FIXED_DT, PhysicsWorld, initRapier } from '../src/physics/world.ts';
 import { Combat } from '../src/game/combat.ts';
 import { ARENA_HALF, Arena } from '../src/game/arena.ts';
@@ -762,6 +763,89 @@ describe('opponent AI', () => {
       world.free();
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Accessories that the simulation can actually see
+// ---------------------------------------------------------------------------
+
+describe('accessories', () => {
+  it('gives the gyro compensator a real effect on the machine', () => {
+    /*
+     * `gyroPenalty` was written into the stats and read by nothing but its own
+     * validation warning — the lean comes out of the rotor's inertia tensor, which
+     * knows nothing about accessories — so 3.8 kg bought a number on a panel.
+     */
+    const base = {
+      ...makeDefaultDesign(),
+      chassisId: 'lowwedge',
+      weaponId: 'undercutter',
+      weaponMaterialId: 'ar500',
+      armorThicknessMm: 5,
+    };
+
+    const lean = (accessories: BotDesign['accessories']): number => {
+      const { world, bot } = solo({ ...base, accessories });
+      bot.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+      run(world, 8);
+      bot.setInput({ throttle: 1, steer: 1, weapon: true, fire: false, selfRight: false });
+      let worst = 0;
+      for (let i = 0; i < Math.round(5 / FIXED_DT); i++) {
+        world.step();
+        worst = Math.max(worst, Math.acos(clamp(bot.up().y, -1, 1)));
+      }
+      world.free();
+      return (worst * 180) / Math.PI;
+    };
+
+    const without = lean([]);
+    const withIt = lean(['antispin']);
+    expect(without, 'a big horizontal rotor should lean the machine in a turn').toBeGreaterThan(5);
+    expect(withIt, 'the compensator did not reduce the lean').toBeLessThan(without * 0.6);
+  });
+
+  it('gives armoured skirts and hinged wedgelets something the solver can see', () => {
+    const base = { ...makeDefaultDesign(), chassisId: 'boxframe', weaponId: 'wedge' };
+
+    const colliders = (accessories: BotDesign['accessories']): number => {
+      const { world, bot } = solo({ ...base, accessories });
+      const count = (bot as unknown as { chassis: { numColliders(): number } }).chassis.numColliders();
+      world.free();
+      return count;
+    };
+
+    // Wedgelets are two real ramps, not two meshes.
+    expect(colliders(['wedgelets'])).toBeGreaterThan(colliders([]));
+
+    // Skirts change where a low side hit lands: they exist to keep weapons out of
+    // the wheels, and the damage model now knows it.
+    const stats = computeStats({ ...base, accessories: ['skirts'] });
+    expect(stats.parts.accessories).toContain('skirts');
+    expect(stats.totalMass).toBeGreaterThan(computeStats({ ...base, accessories: [] }).totalMass);
+  });
+
+  it('offers no meaningless rotor-material choice', () => {
+    // For a weapon with no rotor, every material used to produce a byte-identical
+    // build. The builder now hides the picker; this pins the fact behind it.
+    for (const weapon of WEAPONS) {
+      if (weapon.rotor) continue;
+      const first = computeStats({
+        ...makeDefaultDesign(),
+        chassisId: 'boxframe',
+        weaponId: weapon.id,
+        weaponMaterialId: MATERIALS[0]!.id,
+      });
+      for (const material of MATERIALS.slice(1)) {
+        const other = computeStats({
+          ...makeDefaultDesign(),
+          chassisId: 'boxframe',
+          weaponId: weapon.id,
+          weaponMaterialId: material.id,
+        });
+        expect(other.totalMass).toBeCloseTo(first.totalMass, 9);
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -124,6 +124,8 @@ export interface DerivedStats {
   hasSrimech: boolean;
   /** 0-1, how strongly a big horizontal weapon fights the steering. */
   gyroPenalty: number;
+  /** 0-1 fraction of the rotor's gyroscopic reaction that is cancelled. */
+  gyroCompensation: number;
 }
 
 export interface ValidationIssue {
@@ -221,7 +223,17 @@ export function computeStats(design: BotDesign): DerivedStats {
     weapon.rotor && weapon.rotor.axis === 'y'
       ? clamp((weaponInertia * maxOmega) / (totalMass * 12), 0, 1)
       : 0;
-  const gyroPenalty = parts.accessories.includes('antispin') ? rawGyro * 0.3 : rawGyro;
+  const hasCompensator = parts.accessories.includes('antispin');
+  const gyroPenalty = hasCompensator ? rawGyro * 0.3 : rawGyro;
+  /*
+   * How much of the rotor's gyroscopic reaction the compensator cancels.
+   *
+   * `gyroPenalty` was written into the stats and read by nothing except its own
+   * validation warning — the actual lean comes from the rotor's inertia tensor,
+   * which takes no accessory argument — so the Gyro Compensator was 3.8 kg that
+   * bought a number on a panel. This is the fraction `Bot` actually applies.
+   */
+  const gyroCompensation = hasCompensator ? 0.7 : 0;
 
   return {
     parts,
@@ -252,6 +264,7 @@ export function computeStats(design: BotDesign): DerivedStats {
     invertible: chassis.invertible,
     hasSrimech: parts.accessories.includes('srimech'),
     gyroPenalty,
+    gyroCompensation,
   };
 }
 

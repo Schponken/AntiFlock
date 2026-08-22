@@ -64,6 +64,9 @@ const SUSPENSION_TRAVEL = 0.03;
  */
 const SUSPENSION_SAG = 0.005;
 
+/** Hard ceiling on how fast the frame itself may tumble, rad/s. */
+const MAX_CHASSIS_OMEGA = 30;
+
 /** Lateral grip of a driven wheel, as a fraction of its forward grip. */
 const SIDE_FRICTION = 0.06;
 
@@ -181,12 +184,14 @@ export class Bot {
      * `stats.rotorMassKg` is a separate line in the builder's total and lives on
      * the weapon body.)
      */
+    const wedgeletMass = this.stats.parts.accessories.includes('wedgelets') ? 1.2 : 0;
     const hullMass = Math.max(
       1,
       chassisSpec.frameMass +
         this.stats.armorMass +
         weapon.mountMass -
         actuatorMovingMass(weapon) -
+        wedgeletMass -
         (hasWedge ? WEDGE_COLLIDER_MASS : 0),
     );
     const hull = RAPIER.ColliderDesc.roundCuboid(
@@ -245,6 +250,42 @@ export class Bot {
           .setContactForceEventThreshold(900);
         const wedgeCollider = rapierWorld.createCollider(wedgeDesc, this.chassis);
         this.colliderParts.set(wedgeCollider.handle, {
+          bot: this,
+          partId: 'armor-front',
+          face: 'front',
+          isWeapon: false,
+        });
+      }
+    }
+
+    /*
+     * Hinged wedgelets: two low ramps at the front corners.
+     *
+     * These were drawn and never built. The accessory added 4.6 kg and a pair of
+     * meshes, and the solver saw nothing at all — so the part that exists to stop
+     * an opponent getting under your corners did not stop anything. Slippery for
+     * the same reason the main wedge is: a ground-scraping ramp with tyre grip
+     * anchors the machine on its own hardware.
+     */
+    if (this.stats.parts.accessories.includes('wedgelets')) {
+      const rampWidth = chassisSpec.width * 0.26;
+      const rampLength = chassisSpec.length * 0.16;
+      for (const side of [-1, 1]) {
+        const ramp = RAPIER.ColliderDesc.cuboid(rampWidth / 2, 0.006, rampLength / 2)
+          .setTranslation(
+            side * (chassisSpec.width / 2 - rampWidth / 2),
+            -chassisSpec.height / 2 - chassisSpec.groundClearance * 0.45,
+            chassisSpec.length / 2 - rampLength / 2,
+          )
+          .setRotation(quatFromAxisAngle(1, 0, 0, -0.28))
+          .setMass(0.6)
+          .setFriction(0.1)
+          .setRestitution(0.12)
+          .setCollisionGroups(groups)
+          .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
+          .setContactForceEventThreshold(900);
+        const rampCollider = rapierWorld.createCollider(ramp, this.chassis);
+        this.colliderParts.set(rampCollider.handle, {
           bot: this,
           partId: 'armor-front',
           face: 'front',
@@ -478,6 +519,7 @@ export class Bot {
     this.updateDrive();
     this.updateWeapon(dt);
     this.vehicle.updateVehicle(dt);
+    this.applyGyroCompensation(dt);
 
     if (this.srimechCooldown > 0) this.srimechCooldown -= dt;
 
@@ -517,6 +559,24 @@ export class Bot {
       // Wake it: writing a velocity onto a sleeping body without waking it is how
       // a runaway gets pinned in place instead of corrected.
       this.chassis.setLinvel({ x: v.x * s, y: v.y * s, z: v.z * s }, true);
+    }
+
+    /*
+     * Same guard on the frame's own rotation.
+     *
+     * A big horizontal rotor catching an arena wall is a real and spectacular way
+     * to get thrown, but the tip is doing 108 m/s and moves 225 mm per step, so it
+     * tunnels into the wall and the solver's penetration recovery — not the
+     * bounce — decides what happens next. Measured, that reached 143 rad/s on the
+     * frame. This is a ceiling, not a shaper: normal play tops out around 29, so
+     * it only ever binds on the pathological case. (Rapier's CCD is driven by
+     * linear motion, so it cannot help here: the rotor's centre barely moves.)
+     */
+    const w = this.chassis.angvel();
+    const spin = Math.hypot(w.x, w.y, w.z);
+    if (spin > MAX_CHASSIS_OMEGA) {
+      const s = MAX_CHASSIS_OMEGA / spin;
+      this.chassis.setAngvel({ x: w.x * s, y: w.y * s, z: w.z * s }, true);
     }
 
     const weaponMoving = Math.abs(this._omega) > 3 || this.actuatorTimer > 0;
@@ -677,6 +737,43 @@ export class Bot {
     );
     this.chassis.applyImpulse({ x: 0, y: this.stats.totalMass * 1.6, z: 0 }, true);
     this.srimechCooldown = 2.4;
+  }
+
+  /**
+   * Cancel part of the rotor's gyroscopic reaction on the frame.
+   *
+   * A spinning rotor of angular momentum L makes the machine lean whenever it
+   * turns: the reaction on the chassis is `w x L`, and it is why a big horizontal
+   * bar tips a bot onto two wheels in every corner. The Gyro Compensator is a
+   * counter-rotating mass that cancels most of that, and modelling it as a torque
+   * that removes a fraction of exactly that cross product is both what the part
+   * does and the only way the accessory can have any effect at all — the lean
+   * comes out of the rotor's inertia tensor, which knows nothing about
+   * accessories, so scaling a number in the stats could never reach it.
+   */
+  private applyGyroCompensation(dt: number): void {
+    const fraction = this.stats.gyroCompensation;
+    if (fraction <= 0 || !this.weaponBody) return;
+    if (Math.abs(this._omega) < 1) return;
+
+    const w = this.chassis.angvel();
+    const L = this.weaponBody.angvel();
+    const inertia = this.weaponInertia;
+    // L is the rotor's angular momentum; w x L is the reaction it puts on the frame.
+    const lx = L.x * inertia;
+    const ly = L.y * inertia;
+    const lz = L.z * inertia;
+    const tx = w.y * lz - w.z * ly;
+    const ty = w.z * lx - w.x * lz;
+    const tz = w.x * ly - w.y * lx;
+
+    // The reaction the frame feels is -(w x L), so cancelling a fraction of it
+    // means applying +(w x L) back. Getting this sign backwards doubles the lean
+    // instead of removing it, which is exactly what it did.
+    this.chassis.applyTorqueImpulse(
+      { x: tx * fraction * dt, y: ty * fraction * dt, z: tz * fraction * dt },
+      true,
+    );
   }
 
   private updateWeapon(dt: number): void {
@@ -921,6 +1018,17 @@ export class Bot {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Quaternion from an axis and an angle, for collider-local orientations. */
+function quatFromAxisAngle(
+  x: number,
+  y: number,
+  z: number,
+  angle: number,
+): { x: number; y: number; z: number; w: number } {
+  const s = Math.sin(angle / 2);
+  return { x: x * s, y: y * s, z: z * s, w: Math.cos(angle / 2) };
+}
 
 function quatFromYaw(yaw: number): { x: number; y: number; z: number; w: number } {
   return { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) };

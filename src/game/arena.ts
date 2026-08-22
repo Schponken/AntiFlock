@@ -191,6 +191,14 @@ export class Arena {
       const desc = RAPIER.ColliderDesc.cuboid(spec.half[0], spec.half[1], spec.half[2])
         .setTranslation(spec.pos[0], spec.pos[1], spec.pos[2])
         .setFriction(0.28)
+        /*
+         * Deliberately springy, counter-intuitively. A spinner's tip moves 225 mm
+         * per step and tunnels into the wall, so what happens next is decided by
+         * the solver's penetration recovery rather than by the bounce. Softening
+         * this to a physically tidier 0.12 let the rotor sink in further and made
+         * the ejection five times worse — six metres of altitude instead of one.
+         * A restitution the contact can actually resolve against is the fix.
+         */
         .setRestitution(0.34)
         .setCollisionGroups(ARENA_GROUPS)
         .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
