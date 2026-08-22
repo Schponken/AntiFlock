@@ -56,6 +56,14 @@ export interface HitResult {
   severity: number;
   /** Energy the panel shrugged off into the structure behind it, joules. */
   shock: number;
+  /**
+   * How much of that shock the frame actually took, joules.
+   *
+   * Separate from `shock` because the frame floors at 1 HP: past that point the
+   * strike stops doing structural work and the attacker must not be charged for
+   * it. Zero from a bare `resolveHit`, which has no machine to pass shock into.
+   */
+  shockConsumed: number;
   part: PartState;
 }
 
@@ -143,7 +151,15 @@ export function resolveHit(input: HitInput): HitResult {
   const rebuffed = Math.max(0, Math.max(0, energy) - energyTransferred);
   const shock = rebuffed * SHOCK_COUPLING * targetMaterial.ductility ** 2;
 
-  return { energyTransferred, damage: consumed, destroyed, severity, shock, part };
+  return {
+    energyTransferred,
+    damage: consumed,
+    destroyed,
+    severity,
+    shock,
+    shockConsumed: 0,
+    part,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -292,8 +308,13 @@ export class BotDamage {
       if (frame) {
         const before = frame.hp;
         frame.hp = Math.max(1, frame.hp - result.shock);
-        frame.absorbed += result.shock;
-        this._totalDamageTaken += before - frame.hp;
+        const consumed = before - frame.hp;
+        frame.absorbed += consumed;
+        this._totalDamageTaken += consumed;
+        // Reported back so the attacker can be charged for it, in both joules and
+        // judges' points. Without this the shock was structural damage nobody
+        // paid for and nobody was credited with.
+        result.shockConsumed = consumed;
       }
     }
     return result;

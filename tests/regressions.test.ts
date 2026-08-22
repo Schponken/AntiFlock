@@ -11,7 +11,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { FIXED_DT, PhysicsWorld, initRapier } from '../src/physics/world.ts';
 import { Combat } from '../src/game/combat.ts';
-import { Arena } from '../src/game/arena.ts';
+import { ARENA_HALF, Arena } from '../src/game/arena.ts';
 import { BotAI, type Difficulty } from '../src/game/ai.ts';
 import {
   PRESETS,
@@ -80,6 +80,35 @@ function fight(a: BotDesign, b: BotDesign) {
   return { world, combat, red, blue };
 }
 
+/**
+ * Signed heading change over `seconds`, accumulated step by step.
+ *
+ * Comparing a start and end heading with a cross product reads `sin(theta)`,
+ * which wraps: a machine that pivots 207 degrees to its right reports a positive
+ * number and looks like a left turn. Combat robots pivot at 4-8 rad/s, so any
+ * end-to-end steering measurement over more than a fraction of a second lands in
+ * that trap — and it is exactly the trap that produced a wrong conclusion about
+ * the drivetrain once already. Accumulate per step and the metric cannot wrap.
+ */
+function accumulateTurn(world: PhysicsWorld, bot: Bot, seconds: number): number {
+  const heading = (): number => {
+    const forward = bot.forward();
+    return Math.atan2(forward.x, forward.z);
+  };
+  let previous = heading();
+  let total = 0;
+  for (let i = 0; i < Math.round(seconds / FIXED_DT); i++) {
+    world.step();
+    const current = heading();
+    let delta = current - previous;
+    while (delta > Math.PI) delta -= Math.PI * 2;
+    while (delta < -Math.PI) delta += Math.PI * 2;
+    total += delta;
+    previous = current;
+  }
+  return total;
+}
+
 const drive = (bot: Bot, throttle: number, steer = 0): void => {
   bot.setInput({ throttle, steer, weapon: false, fire: false, selfRight: false });
 };
@@ -119,20 +148,28 @@ describe('drivetrain', () => {
     }
   });
 
-  it('steers the way the key says: right yaws right', () => {
-    const { world, bot } = solo(presetById('sparkplug').design);
-    run(world, 1);
-    const before = bot.forward().clone();
-    drive(bot, 0, 1);
-    run(world, 1.5);
-    const after = bot.forward().clone();
-
+  it('steers the way the key says, on every frame in the catalogue', () => {
     // The machine's own right-hand side is body -X, so a right turn takes the
-    // forward vector from +Z towards -X. That is a negative Y component on
-    // before x after.
-    const yaw = before.z * after.x - before.x * after.z;
-    expect(yaw).toBeLessThan(-0.1);
-    world.free();
+    // forward vector from +Z towards -X: a negative accumulated heading change.
+    for (const preset of PRESETS) {
+      for (const steer of [1, -1]) {
+        const { world, bot } = solo(preset.design);
+        run(world, 1);
+        drive(bot, 0, steer);
+        const turned = accumulateTurn(world, bot, 1.5);
+        if (steer > 0) {
+          expect(turned, `${preset.design.name} turned left on a right input`).toBeLessThan(-0.5);
+        } else {
+          expect(turned, `${preset.design.name} turned right on a left input`).toBeGreaterThan(0.5);
+        }
+        // A 250 lb machine pivoting faster than about two turns a second is not
+        // skid steer, it is a bug. This is what caught the doubled yaw couple.
+        expect(Math.abs(turned) / 1.5, `${preset.design.name} pivots implausibly fast`).toBeLessThan(
+          13,
+        );
+        world.free();
+      }
+    }
   });
 
   it('does not exceed the top speed it advertises', () => {
@@ -252,15 +289,66 @@ describe('inversion', () => {
     expect(bot.inverted).toBe(true);
 
     const start = bot.position().clone();
+    const facing = bot.forward().clone().setY(0).normalize();
     drive(bot, 1);
     run(world, 3);
+    const travelled = bot.position().clone().sub(start).setY(0);
+    expect(travelled.length(), 'invertible frame is stranded on its back').toBeGreaterThan(0.5);
+    // Forward has to mean forward. Asserting distance alone passed just as well
+    // with the inverted throttle fully reversed.
     expect(
-      bot.position().distanceTo(start),
-      'invertible frame is stranded on its back',
-    ).toBeGreaterThan(0.5);
+      travelled.dot(facing),
+      'upside-down, the throttle drove it backwards',
+    ).toBeGreaterThan(travelled.length() * 0.5);
     expect(bot.inverted, 'it should still be running upside-down, not have flopped over').toBe(
       true,
     );
+    world.free();
+  });
+
+  it('holds an invertible frame to its advertised top speed upside-down', () => {
+    // Back-EMF is measured at the wheel, and the wheel's forward reverses with the
+    // suspension ray. Miss that and the motor sits on its current limit at every
+    // speed: measured, 1.7x the quoted top speed with no fade at all.
+    const design = presetById('anvilhead').design;
+    const stats = computeStats(design);
+    const { world, bot } = solo(design);
+    run(world, 1);
+    flip(bot, world, stats.parts.chassis.height);
+    expect(bot.inverted).toBe(true);
+
+    drive(bot, 1);
+    let peak = 0;
+    for (let i = 0; i < Math.round(4 / FIXED_DT); i++) {
+      world.step();
+      peak = Math.max(peak, bot.speed);
+    }
+    expect(peak, 'inverted machine ran past its own spec sheet').toBeLessThanOrEqual(
+      stats.topSpeed * 1.08,
+    );
+    world.free();
+  });
+
+  it('drives after the chassis has been asleep', () => {
+    // Rapier's vehicle controller writes velocity onto a sleeping body without
+    // waking it, so the machine accumulates speed it never acts on. Two seconds
+    // of stillness was enough: 0.00 m travelled while the readout claimed 64 mph.
+    // Doorstop is a fixed wedge: no weapon body on a joint to keep it awake, so it
+    // genuinely settles, which is the state this is about.
+    const { world, bot } = solo(presetById('doorstop').design);
+    run(world, 4);
+    expect(
+      (bot as unknown as { chassis: { isSleeping(): boolean } }).chassis.isSleeping(),
+      'the chassis never went to sleep, so this test proves nothing',
+    ).toBe(true);
+
+    const start = bot.position().clone();
+    drive(bot, 1);
+    run(world, 2.5);
+    const moved = bot.position().distanceTo(start);
+    expect(moved, 'a sleeping machine ignored the throttle').toBeGreaterThan(1);
+    // ...and the reported speed has to match the ground it actually covered.
+    expect(bot.speed).toBeLessThan((moved / 2.5) * 3);
     world.free();
   });
 
@@ -275,15 +363,12 @@ describe('inversion', () => {
       flip(bot, world, stats.parts.chassis.height);
       expect(bot.inverted).toBe(true);
 
-      const before = bot.forward().clone();
       drive(bot, 0, steer);
-      run(world, 1.5);
-      const after = bot.forward().clone();
-      const yaw = before.z * after.x - before.x * after.z;
+      const turned = accumulateTurn(world, bot, 1.5);
 
       // Same sign convention as the right-way-up test: right is negative.
-      if (steer > 0) expect(yaw, 'inverted right turn went left').toBeLessThan(0);
-      else expect(yaw, 'inverted left turn went right').toBeGreaterThan(0);
+      if (steer > 0) expect(turned, 'inverted right turn went left').toBeLessThan(-0.1);
+      else expect(turned, 'inverted left turn went right').toBeGreaterThan(0.1);
       world.free();
     }
   });
@@ -529,6 +614,73 @@ describe('arena', () => {
     // 620 mm over 250 ms is 2.5 m/s, so one 2 ms step can move at most ~5 mm.
     expect(biggestStep, 'the blade jumped in a single step').toBeLessThan(0.02);
     expect(previous - home, 'the blade never came up').toBeGreaterThan(0.5);
+    world.free();
+  });
+
+  it('lands a pulveriser on a machine parked under it', () => {
+    /*
+     * The arm used to hang straight down and *lift* when fired, so its lowest
+     * point over the whole arc was 694 mm — while the tallest frame in the
+     * catalogue tops out at 400 mm. It could not touch anything in the game. A
+     * pulveriser parks cocked against its own wall and slams down.
+     */
+    for (const side of [-1, 1] as const) {
+      /*
+       * One machine, and a fixed wedge at that: no weapon body on a joint, so
+       * parking it by moving the chassis does not leave a stretched joint that
+       * flings it back across the arena before the arm ever comes down.
+       */
+      const { world, combat, bot } = solo(presetById('doorstop').design);
+      // Park it under the arm's actual pivot rather than a copy of the constant.
+      const pivot = (
+        combat.arena as unknown as { hazards: { kind: string; home: THREE.Vector3 }[] }
+      ).hazards.find((h) => h.kind === 'pulverizer' && Math.sign(h.home.z) === side)!.home;
+      const chassis = (bot as unknown as { chassis: any }).chassis;
+      chassis.setTranslation({ x: 0, y: 0.2, z: pivot.z }, true);
+      chassis.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      chassis.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      run(world, 1);
+      expect(
+        Math.abs(bot.position().z - pivot.z),
+        'the machine did not stay parked under the arm',
+      ).toBeLessThan(0.5);
+
+      const before = bot.damage.integrity;
+      combat.arena.triggerPulverizer(side);
+      run(world, 4);
+      expect(
+        bot.damage.integrity,
+        `the ${side < 0 ? 'near' : 'far'} pulveriser could not reach the floor`,
+      ).toBeLessThan(before);
+      world.free();
+    }
+  });
+
+  it('never swings a pulveriser out through the arena wall', () => {
+    const world = new PhysicsWorld();
+    const arena = new Arena(world, { headless: true });
+    const hazards = (arena as unknown as { hazards: { kind: string; body: any; home: any }[] })
+      .hazards;
+
+    for (const side of [-1, 1] as const) {
+      arena.triggerPulverizer(side);
+      let worst = 0;
+      for (let i = 0; i < Math.round(3 / FIXED_DT); i++) {
+        arena.update(FIXED_DT);
+        world.step();
+        for (const hazard of hazards) {
+          if (hazard.kind !== 'pulverizer') continue;
+          // Furthest the arm's tip reaches, in the direction of its own wall.
+          const rotation = hazard.body.rotation();
+          const q = new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
+          const tip = new THREE.Vector3(0, -1.22, 0).applyQuaternion(q);
+          const z = hazard.body.translation().z + tip.z;
+          worst = Math.max(worst, Math.abs(z));
+        }
+      }
+      expect(worst, 'a pulveriser arm reached past the inner wall face').toBeLessThan(ARENA_HALF);
+      run(world, 4);
+    }
     world.free();
   });
 
@@ -854,6 +1006,37 @@ describe('energy conservation', () => {
     // have paid out more — bearing drag and the freewheel are not free.
     expect(spent).toBeGreaterThanOrEqual(delivered * 0.98);
     world.free();
+  });
+
+  it('charges the rotor for the shock it drove through the armour, not just the panel', () => {
+    /*
+     * Directly on the damage model, because the fight version above cannot see
+     * this: bearing drag alone satisfies "paid out at least what it delivered",
+     * so removing the shock term entirely would leave that test green. Plastic is
+     * the case that matters — a ductile panel refuses most of the strike and hands
+     * it to the frame, and it was that share nobody was ever charged for.
+     */
+    const design = makeDefaultDesign();
+    design.armorMaterialId = 'uhmw';
+    const stats = computeStats(design);
+    const damage = new BotDamage(stats);
+    const panel = damage.get('armor-front')!;
+    const frameBefore = damage.get('frame')!.hp;
+
+    const result = damage.hit({
+      energy: 20_000,
+      bite: 1,
+      squareness: 0.85,
+      targetMaterial: stats.parts.armor,
+      part: panel,
+    });
+
+    expect(result.shockConsumed, 'no shock reached the frame').toBeGreaterThan(0);
+    expect(result.shockConsumed).toBeCloseTo(frameBefore - damage.get('frame')!.hp, 6);
+    // Everything the strike did to the machine, and nothing it did not do.
+    const inflicted = result.damage + result.shockConsumed;
+    expect(inflicted).toBeGreaterThan(result.damage);
+    expect(inflicted).toBeLessThanOrEqual(20_000);
   });
 });
 

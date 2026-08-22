@@ -255,8 +255,19 @@ export class Combat {
     });
 
     this.hitCooldowns.set(key, HIT_COOLDOWN);
-    attacker.damageDealt += result.damage;
-    attacker.aggression += result.damage * 0.0002;
+    /*
+     * Everything the strike did to the defender, not just the panel's share.
+     *
+     * Shock through the armour into the frame is structural damage the attacker
+     * caused, and the judges score on `damageDealt` alone — so crediting only the
+     * absorbed part meant up to 69% of the damage an attacker inflicted went
+     * unrecorded. Worse, the uncredited share is set by the *defender's* armour, so
+     * it does not cancel between the two machines: a spinner working on a plastic
+     * bot could out-damage its opponent two to one and lose the damage column.
+     */
+    const inflicted = result.damage + result.shockConsumed;
+    attacker.damageDealt += inflicted;
+    attacker.aggression += inflicted * 0.0002;
 
     // What the panel refused comes back up the weapon, scaled by how hard that
     // panel is. Hitting tool steel blunts a rotor; hitting plastic barely marks it.
@@ -266,7 +277,10 @@ export class Combat {
     /*
      * Plastic deformation has to come from somewhere: take it out of the rotor.
      *
-     * All of it, not 55% of it. The whole premise of this model is one shared
+     * All of it — the panel's share *and* the shock that carried on through into
+     * the frame. Charging only the absorbed part while `BotDamage.hit` quietly
+     * spent the rest on the frame put up to three times as many joules into a
+     * machine's structure as ever left the weapon that hit it. The whole premise of this model is one shared
      * currency — the joules that come off the rotor are the joules that go into
      * the other machine's structure — and taking only a fraction back meant a
      * spinner destroyed nearly twice as much armour as it paid for. (The energy
@@ -276,7 +290,7 @@ export class Combat {
      * double-counting.) A big hit now genuinely costs a spinner its wind-up, which
      * is the single most recognisable rhythm in the sport.
      */
-    if (weapon.rotor) attacker.bleedWeaponEnergy(result.energyTransferred);
+    if (weapon.rotor) attacker.bleedWeaponEnergy(result.energyTransferred + result.shockConsumed);
 
     this.events.emit('impact', {
       position: point.clone(),

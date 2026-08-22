@@ -31,7 +31,7 @@ import {
   type WeaponSpec,
   type WheelSpec,
 } from './parts.ts';
-import { clamp } from '../core/mathx.ts';
+import { clamp, mpsToMph } from '../core/mathx.ts';
 
 /** Batteries, ESCs, receiver, wiring and the link light. Every bot carries this. */
 export const BASE_ELECTRONICS_KG = 9.0;
@@ -289,6 +289,19 @@ export function validateDesign(design: BotDesign): ValidationIssue[] {
     issues.push({
       level: 'warning',
       message: `Only ${(stats.weightUsed * 100).toFixed(0)}% of the weight allowance used. That is free armour you are leaving in the pit.`,
+    });
+  }
+
+  /*
+   * A 250 lb machine geared for 54 mph is not a fast machine, it is a machine
+   * whose gearbox is wrong: the box is 15 m across, so anything past the mid
+   * twenties is unreachable, and the builder was quoting a top speed it missed by
+   * a factor of two. There was a warning at the slow end and none at the fast one.
+   */
+  if (stats.topSpeed > 11) {
+    issues.push({
+      level: 'warning',
+      message: `Geared for ${mpsToMph(stats.topSpeed).toFixed(0)} mph — far past anything a 48-foot box lets you use.`,
     });
   }
 

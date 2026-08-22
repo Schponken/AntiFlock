@@ -131,7 +131,7 @@ export class Bot {
   damageDealt = 0;
 
   private tmpVec = new THREE.Vector3();
-  private tmpVec2 = new THREE.Vector3();
+  private tmpVec3 = new THREE.Vector3();
   private tmpQuat = new THREE.Quaternion();
 
   constructor(options: {
@@ -478,7 +478,6 @@ export class Bot {
     this.updateDrive();
     this.updateWeapon(dt);
     this.vehicle.updateVehicle(dt);
-    this.applyDifferentialYaw();
 
     if (this.srimechCooldown > 0) this.srimechCooldown -= dt;
 
@@ -515,7 +514,9 @@ export class Bot {
     const speed = Math.hypot(v.x, v.y, v.z);
     if (speed > 32) {
       const s = 32 / speed;
-      this.chassis.setLinvel({ x: v.x * s, y: v.y * s, z: v.z * s }, false);
+      // Wake it: writing a velocity onto a sleeping body without waking it is how
+      // a runaway gets pinned in place instead of corrected.
+      this.chassis.setLinvel({ x: v.x * s, y: v.y * s, z: v.z * s }, true);
     }
 
     const weaponMoving = Math.abs(this._omega) > 3 || this.actuatorTimer > 0;
@@ -583,22 +584,44 @@ export class Bot {
     const steer = clamp(this.input.steer, -1, 1);
 
     /*
-     * Back-EMF, done with the sign the motor actually sees.
+     * Back-EMF, measured at each wheel rather than at the chassis.
      *
-     * A brushed DC motor makes tau = tau_stall * (1 - w/w_free), and `w` is
-     * signed: it is only opposing you when the machine is already moving the way
-     * you are asking it to go. Taking |speed| instead — and then only fading to
-     * 8% of stall — meant the advertised top speed was not a top speed at all.
-     * Nothing else in the model resists a rolling machine hard enough to hold it
-     * there, so builds simply kept accelerating past their own spec sheet.
+     * A brushed DC motor makes tau = tau_stall * (1 - w/w_free), and `w` is the
+     * speed of *that motor's own wheel* over the ground — not the speed of the
+     * machine. Using `currentVehicleSpeed()` got that right only while driving in
+     * a straight line, and was badly wrong in the case that matters most: during a
+     * pivot the chassis barely translates, so the term read ~0 and every motor
+     * delivered full stall torque forever. Two-wheel frames spun up to 45 rad/s —
+     * seven revolutions a second, with a wheel rim doing 16 m/s, twice the free
+     * speed of the motor turning it.
      *
-     * With the signed ratio the force genuinely reaches zero at the design free
-     * speed, and driving *against* the motion gets more than stall torque, which
-     * is both what a real motor does and what makes a skid-steer pivot crisply.
-     * The 1.35 ceiling is the current limit every real speed controller has.
+     * Taking the velocity of the contact patch (`v + w x r`) and projecting it on
+     * the wheel's forward direction is what the motor actually sees, so it loads
+     * up in a pivot exactly as it does in a straight line. It also removes the
+     * need to special-case an inverted machine: the wheel's forward reverses with
+     * the suspension ray, and that factor is already in `wheelForward`.
+     *
+     * Driving *against* the motion gets more than stall torque, which is both what
+     * a real motor does and what makes a skid-steer pivot crisply. The 1.35
+     * ceiling is the current limit every real speed controller has.
      */
-    const speed = this.vehicle.currentVehicleSpeed();
     const freeSpeed = Math.max(0.5, this.stats.topSpeed);
+    const linvel = this.chassis.linvel();
+    const angvel = this.chassis.angvel();
+    const bodyRotation = this.chassis.rotation();
+    this.tmpQuat.set(bodyRotation.x, bodyRotation.y, bodyRotation.z, bodyRotation.w);
+    const wheelForward = this.forward(this.tmpVec)
+      .normalize()
+      .multiplyScalar(this.invertedDriveSign);
+
+    /*
+     * Rapier's vehicle controller writes velocity onto the chassis without waking
+     * it, and a machine that has been still for a couple of seconds is asleep. It
+     * then accumulates velocity it never acts on: measured, a settled inverted bot
+     * stayed at the same coordinates for six seconds while its reported speed
+     * climbed to 64 mph. Asking for drive has to wake the body.
+     */
+    if (Math.abs(throttle) > 0.02 || Math.abs(steer) > 0.02) this.chassis.wakeUp();
 
     // With +Z forward and +Y up, the machine's own right-hand side is body -X —
     // which is where the even-indexed wheels sit (`side = -1` at construction).
@@ -615,7 +638,20 @@ export class Bot {
         continue;
       }
       const demand = i % 2 === 0 ? rightSideDrive : leftSideDrive;
-      const ratio = demand === 0 ? 0 : clamp((speed * Math.sign(demand)) / freeSpeed, -1, 1);
+
+      // Ground speed of this wheel's contact patch, along the wheel's forward.
+      let wheelSpeed = 0;
+      const connection = this.vehicle.wheelChassisConnectionPointCs(i);
+      if (connection) {
+        const arm = this.tmpVec3
+          .set(connection.x, connection.y, connection.z)
+          .applyQuaternion(this.tmpQuat);
+        wheelSpeed =
+          (linvel.x + angvel.y * arm.z - angvel.z * arm.y) * wheelForward.x +
+          (linvel.y + angvel.z * arm.x - angvel.x * arm.z) * wheelForward.y +
+          (linvel.z + angvel.x * arm.y - angvel.y * arm.x) * wheelForward.z;
+      }
+      const ratio = demand === 0 ? 0 : clamp((wheelSpeed * Math.sign(demand)) / freeSpeed, -1, 1);
       const availableForce = perWheelForce * clamp(1 - ratio, 0, 1.35);
       this.vehicle.setWheelEngineForce(i, demand * availableForce * mobility);
       this.vehicle.setWheelBrake(i, braking ? this.stats.totalMass * 1.4 : 0);
@@ -641,53 +677,6 @@ export class Bot {
     );
     this.chassis.applyImpulse({ x: 0, y: this.stats.totalMass * 1.6, z: 0 }, true);
     this.srimechCooldown = 2.4;
-  }
-
-  /**
-   * Restore the yaw couple that differential thrust ought to produce.
-   *
-   * Rapier's raycast vehicle applies each wheel's drive impulse at the chassis
-   * centre of mass. That gives the right linear acceleration but throws away the
-   * moment arm, so two wheels driving forward and two driving backwards cancel
-   * out to nothing instead of pivoting the machine on the spot — and a bot that
-   * has lost the wheels down one side tracks perfectly straight.
-   *
-   * Adding back `sum(-x_i * J_i)` about the body's up axis reinstates exactly the
-   * moment the solver dropped. Because it is built from the wheels' *actual*
-   * traction-limited impulses, it can never exceed what the floor can supply.
-   */
-  private applyDifferentialYaw(): void {
-    /*
-     * Built in world space, deliberately.
-     *
-     * The short form — `sum(-c_x * J)` about the *body* up axis — is right the
-     * way up and exactly backwards upside-down, because both the body up axis and
-     * Rapier's wheel-forward direction reverse and the two do not cancel. Taking
-     * the vertical component of a proper `r x F` in world coordinates is correct
-     * in every attitude and reduces to the short form when the machine is level.
-     */
-    const forward = this.forward(this.tmpVec).normalize();
-    // The wheel's forward flips with the suspension ray direction.
-    if (this._inverted && this.stats.invertible) forward.multiplyScalar(-1);
-
-    const rotation = this.chassis.rotation();
-    this.tmpQuat.set(rotation.x, rotation.y, rotation.z, rotation.w);
-
-    let torqueY = 0;
-    for (let i = 0; i < this.wheelDead.length; i++) {
-      if (this.wheelDead[i] || !this.vehicle.wheelIsInContact(i)) continue;
-      const impulse = this.vehicle.wheelForwardImpulse(i);
-      const connection = this.vehicle.wheelChassisConnectionPointCs(i);
-      if (impulse === null || !connection) continue;
-      const arm = this.tmpVec2
-        .set(connection.x, connection.y, connection.z)
-        .applyQuaternion(this.tmpQuat);
-      // (r x F)_y, with F = impulse * forward.
-      torqueY += impulse * (arm.z * forward.x - arm.x * forward.z);
-    }
-    if (Math.abs(torqueY) < 1e-6) return;
-
-    this.chassis.applyTorqueImpulse({ x: 0, y: torqueY, z: 0 }, true);
   }
 
   private updateWeapon(dt: number): void {

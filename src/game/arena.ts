@@ -36,6 +36,9 @@ export const START_SQUARES: readonly { x: number; z: number; facing: number }[] 
   { x: 0, z: ARENA_HALF - 2.1, facing: Math.PI },
 ];
 
+/** How far back a pulveriser cocks its arm from vertical, radians. */
+const PULVERIZER_RAISED = 1.5;
+
 export type HazardKind = 'killsaw' | 'pulverizer' | 'screw';
 
 export interface HazardHit {
@@ -57,6 +60,8 @@ interface Hazard {
   cooldown: number;
   /** Local data for the specific hazard's motion. */
   home: THREE.Vector3;
+  /** Pulverisers: the angle the arm is parked at, cocked against its own wall. */
+  restAngle: number;
   axis: THREE.Vector3;
   phase: number;
 }
@@ -345,6 +350,7 @@ export class Arena {
         energy: 5200,
         active: 0,
         duration: 0,
+        restAngle: 0,
         cooldown: 0,
         home,
         axis: new THREE.Vector3(1, 0, 0),
@@ -355,12 +361,38 @@ export class Arena {
 
   private buildPulverizers(): void {
     const rapier = this.world.world;
-    const armLength = 0.85;
+    /*
+     * Geometry chosen so the head actually reaches the floor.
+     *
+     * A pulveriser parks cocked against its own wall and slams *down*; it does not
+     * hang straight down and lift. Built the other way round, the arm's lowest
+     * point over the whole arc was y = 0.694 m while the tallest frame in the
+     * catalogue tops out at 0.400 m, so the hazard could not touch a single
+     * machine in the game — eight positions under the near arm, fired four times
+     * each, produced zero contacts. Pivot 1.35 with a 1.22 m arm brings the head
+     * down to about 10 mm off the deck, which crosses every chassis in the box.
+     */
+    const armLength = 1.22;
+    const headHeight = 0.24;
 
     for (const sz of [-1, 1]) {
-      const pivot = new THREE.Vector3(0, 1.55, sz * (ARENA_HALF - 0.45));
+      // Far enough inboard that a machine can actually sit under the head. At
+      // 0.45 m the pivot was so close to the wall that a 0.8 m frame parked under
+      // it was already touching the polycarbonate and got shoved out of the way
+      // before the arm could come down.
+      const pivot = new THREE.Vector3(0, 1.35, sz * (ARENA_HALF - 1.1));
+      const restAngle = sz * PULVERIZER_RAISED;
+      /*
+       * Built already parked. A kinematic body keeps whatever rotation it was
+       * created with until the first `setNextKinematicRotation`, so leaving this
+       * at identity meant the arm spent the opening frame hanging straight down
+       * through the floor — and anything standing under it was launched across
+       * the arena at 10 m/s the instant the hazard snapped up to its rest pose.
+       */
       const body = rapier.createRigidBody(
-        RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(pivot.x, pivot.y, pivot.z),
+        RAPIER.RigidBodyDesc.kinematicPositionBased()
+          .setTranslation(pivot.x, pivot.y, pivot.z)
+          .setRotation(axisAngleQuat(new THREE.Vector3(1, 0, 0), restAngle)),
       );
       const arm = RAPIER.ColliderDesc.cuboid(0.16, armLength / 2, 0.1)
         .setTranslation(0, -armLength / 2, 0)
@@ -370,6 +402,16 @@ export class Arena {
         .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
       const collider = rapier.createCollider(arm, body);
       this.hazardColliders.set(collider.handle, { kind: 'pulverizer', energy: 9000 });
+
+      // The head is what lands, so give it the collider the drawing implies.
+      const headDesc = RAPIER.ColliderDesc.cuboid(0.16, headHeight / 2, 0.1)
+        .setTranslation(0, -armLength, 0)
+        .setFriction(0.5)
+        .setRestitution(0.1)
+        .setCollisionGroups(HAZARD_GROUPS)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+      const headCollider = rapier.createCollider(headDesc, body);
+      this.hazardColliders.set(headCollider.handle, { kind: 'pulverizer', energy: 9000 });
 
       let mesh: THREE.Object3D | null = null;
       if (!this.headless) {
@@ -386,17 +428,23 @@ export class Arena {
         shaft.position.y = -armLength / 2;
         shaft.castShadow = true;
         mesh.add(shaft);
-        const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.24, 0.2), material);
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, headHeight, 0.2), material);
         head.position.y = -armLength;
         head.castShadow = true;
         mesh.add(head);
         mesh.position.copy(pivot);
         this.group.add(mesh);
 
-        // Mounting bracket on the wall above.
-        const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.2, 0.5), material);
-        bracket.position.set(pivot.x, pivot.y + 0.16, pivot.z + sz * 0.24);
+        // Pivot housing, and the strut that carries it back to the wall.
+        const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.2, 0.34), material);
+        bracket.position.set(pivot.x, pivot.y + 0.16, pivot.z);
         this.group.add(bracket);
+
+        const reachBack = ARENA_HALF - Math.abs(pivot.z);
+        const strut = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, reachBack), material);
+        strut.position.set(pivot.x, pivot.y + 0.16, pivot.z + (sz * reachBack) / 2);
+        strut.castShadow = true;
+        this.group.add(strut);
       }
 
       this.hazards.push({
@@ -408,8 +456,18 @@ export class Arena {
         duration: 0,
         cooldown: 0,
         home: pivot,
+        /*
+         * Parked raised and pointing *inward*, over the floor, and it slams down
+         * to vertical — which is how a real one works and, more prosaically, the
+         * only way it can park at all: the arm is 1.22 m long and there is 0.45 m
+         * between the pivot and the wall behind it, so cocking it outward puts the
+         * tip at z = 8.08 against an inner wall face at 7.32. Rx swings the arm's
+         * -Y toward -Z for a positive angle, so each unit parks with the sign of
+         * its own side and neither ever passes vertical on the way down.
+         */
+        restAngle,
         axis: new THREE.Vector3(1, 0, 0),
-        phase: sz > 0 ? Math.PI : 0,
+        phase: 0,
       });
     }
   }
@@ -481,6 +539,7 @@ export class Arena {
         energy: 1400,
         active: 0,
         duration: 0,
+        restAngle: 0,
         cooldown: 0,
         home,
         axis: new THREE.Vector3(0, 0, 1),
@@ -619,7 +678,8 @@ export class Arena {
           // Snap down fast, recover slowly — the real ones hit hard and reset lazily.
           const t = hazard.active > 0 ? clamp01(1 - hazard.active / 0.85) : 0;
           const swing = t < 0.35 ? smoothstep(0, 0.35, t) : 1 - smoothstep(0.45, 1, t);
-          const angle = swing * 1.5;
+          // Full swing is straight down; at rest it is cocked back at `restAngle`.
+          const angle = (1 - swing) * hazard.restAngle;
           hazard.body.setNextKinematicRotation(axisAngleQuat(hazard.axis, angle));
           if (hazard.mesh) hazard.mesh.rotation.x = angle;
           break;
