@@ -283,7 +283,7 @@ export function validateDesign(design: BotDesign): ValidationIssue[] {
   if (!chassis.accepts.includes(weapon.kind)) {
     issues.push({
       level: 'error',
-      message: `${chassis.name} has no mounting for a ${weapon.name.toLowerCase()}.`,
+      message: `${chassis.name} has no mounting for ${/^[aeiou]/i.test(weapon.name) ? 'an' : 'a'} ${weapon.name.toLowerCase()}.`,
     });
   }
 

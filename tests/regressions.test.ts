@@ -23,6 +23,7 @@ import {
   type BotDesign,
 } from '../src/game/design.ts';
 import {
+  ACCESSORIES,
   MATERIALS,
   WEAPONS,
   materialById,
@@ -1064,6 +1065,47 @@ describe('show open', () => {
 // ---------------------------------------------------------------------------
 
 describe('energy conservation', () => {
+  it('charges the rotor per strike, above and beyond bearing drag', () => {
+    /*
+     * The whole-fight version below is satisfied by drag alone: a freewheeling
+     * rotor loses energy anyway, so "paid out at least what it delivered" stays
+     * true with the bleed deleted entirely. Sample the rotor either side of each
+     * individual impact instead, and the drag over a couple of milliseconds is
+     * negligible against the strike.
+     */
+    const { world, combat, red, blue } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+
+    let sampled = 0;
+    let delivered = 0;
+    let paid = 0;
+    let before = 0;
+    combat.events.on('impact', (impact) => {
+      if (impact.kind !== 'weapon' || impact.attacker !== red) return;
+      // `impact` is emitted after the bleed, so `before` is last frame's reading.
+      sampled += 1;
+      delivered += impact.energy;
+      paid += Math.max(0, before - red.weaponEnergy);
+    });
+
+    red.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+    run(world, 6);
+    red.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+    blue.setInput({ throttle: -1, steer: 0, weapon: false, fire: false, selfRight: false });
+    for (let i = 0; i < Math.round(12 / FIXED_DT); i++) {
+      before = red.weaponEnergy;
+      world.step();
+    }
+
+    expect(sampled, 'the weapon never landed a hit').toBeGreaterThan(0);
+    // Per strike, the rotor pays for what it delivered. Drag over one 2 ms step is
+    // worth a few joules against strikes worth thousands.
+    expect(paid).toBeGreaterThan(delivered * 0.9);
+    world.free();
+  });
+
   it('takes off the rotor exactly what it puts into the target', () => {
     const { world, combat, red, blue } = fight(
       presetById('sparkplug').design,
@@ -1164,5 +1206,197 @@ describe('bodywork', () => {
     crowded.computeBoundingBox();
     expect(crowded.boundingBox!.max.x).toBeCloseTo(width / 2, 2);
     registry.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Coverage the mutation sweep proved was missing
+// ---------------------------------------------------------------------------
+
+describe('every accessory changes something', () => {
+  /*
+   * Each of these could be turned into a no-op with the whole suite green. One
+   * assertion per accessory, on the specific quantity it is sold on.
+   */
+  const base = (): BotDesign => ({
+    ...makeDefaultDesign(),
+    chassisId: 'lowwedge',
+    weaponId: 'undercutter',
+    weaponMaterialId: 'ar500',
+  });
+  const withAccessory = (id: BotDesign['accessories'][number]) =>
+    computeStats({ ...base(), accessories: [id] });
+  const plain = () => computeStats({ ...base(), accessories: [] });
+
+  it('ablative plating buys armour hit points', () => {
+    expect(withAccessory('ablative').armorHp).toBeGreaterThan(plain().armorHp * 1.1);
+  });
+
+  it('the big battery spins the weapon up faster and charges an actuator harder', () => {
+    expect(withAccessory('bigbattery').weaponSpinupTime).toBeLessThan(plain().weaponSpinupTime);
+    const flipper = { ...base(), chassisId: 'boxframe', weaponId: 'flipper' };
+    expect(computeStats({ ...flipper, accessories: ['bigbattery'] }).actuatorEnergy).toBeGreaterThan(
+      computeStats({ ...flipper, accessories: [] }).actuatorEnergy,
+    );
+  });
+
+  it('the gyro compensator cuts the gyroscopic penalty', () => {
+    expect(withAccessory('antispin').gyroPenalty).toBeLessThan(plain().gyroPenalty * 0.5);
+    expect(withAccessory('antispin').gyroCompensation).toBeGreaterThan(0);
+  });
+
+  it('every accessory costs weight, so none of them is free', () => {
+    for (const accessory of ACCESSORIES) {
+      expect(
+        withAccessory(accessory.id).totalMass,
+        `${accessory.name} weighs nothing`,
+      ).toBeGreaterThan(plain().totalMass);
+    }
+  });
+});
+
+describe('damage bookkeeping', () => {
+  it('binds the drivetrain as the frame folds', () => {
+    const stats = computeStats(makeDefaultDesign());
+    const damage = new BotDamage(stats);
+    const healthy = damage.mobility;
+    expect(healthy).toBeCloseTo(1, 6);
+
+    const frame = damage.get('frame')!;
+    frame.hp = frame.maxHp * 0.5;
+    expect(damage.mobility, 'a half-folded frame drove exactly as well').toBeLessThan(healthy);
+    // ...but never to zero on frame damage alone: a bent frame is not a knockout.
+    frame.hp = 1;
+    expect(damage.mobility).toBeGreaterThan(0);
+  });
+
+  it('blunts a weapon on a hard target and eventually kills it', () => {
+    const stats = computeStats(makeDefaultDesign());
+    const damage = new BotDamage(stats);
+    const weapon = damage.get('weapon')!;
+    const full = damage.weaponCondition;
+    expect(full).toBeCloseTo(1, 6);
+
+    damage.wearWeapon(weapon.maxHp * 0.4);
+    expect(damage.weaponCondition).toBeCloseTo(0.6, 3);
+
+    damage.wearWeapon(weapon.maxHp);
+    expect(damage.weaponCondition).toBe(0);
+    expect(weapon.destroyed).toBe(true);
+
+    // A dead weapon cannot be worn any further.
+    damage.wearWeapon(1000);
+    expect(weapon.hp).toBe(0);
+  });
+});
+
+describe('shoving and hazards', () => {
+  it('counts a hard ram as damage and credits the machine that did it', () => {
+    const { world, combat, red, blue } = fight(
+      presetById('doorstop').design,
+      presetById('doorstop').design,
+    );
+
+    const kinds: string[] = [];
+    combat.events.on('impact', (impact) => kinds.push(impact.kind));
+
+    // Nose to nose, then drive them into each other.
+    const put = (bot: Bot, z: number, facing: number): void => {
+      const chassis = (bot as unknown as { chassis: any }).chassis;
+      chassis.setTranslation({ x: 0, y: 0.2, z }, true);
+      chassis.setRotation({ x: 0, y: Math.sin(facing / 2), z: 0, w: Math.cos(facing / 2) }, true);
+      chassis.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      chassis.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    };
+    put(red, -3, 0);
+    put(blue, 3, Math.PI);
+    run(world, 0.5);
+
+    red.setInput({ throttle: 1, steer: 0, weapon: false, fire: false, selfRight: false });
+    blue.setInput({ throttle: 1, steer: 0, weapon: false, fire: false, selfRight: false });
+    run(world, 6);
+
+    expect(kinds, 'two machines met head-on and nothing registered').toContain('ram');
+    expect(red.damageDealt + blue.damageDealt, 'ramming was worth nothing').toBeGreaterThan(0);
+    world.free();
+  });
+
+  it('rate-limits repeated strikes on the same pair', () => {
+    // Without the cooldown a sustained contact bills a hit every physics step —
+    // 480 a second — instead of one per tooth pass.
+    const { world, combat, red, blue } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+    let weaponHits = 0;
+    combat.events.on('impact', (impact) => {
+      if (impact.kind === 'weapon') weaponHits += 1;
+    });
+
+    red.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+    run(world, 6);
+    red.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+    blue.setInput({ throttle: -1, steer: 0, weapon: false, fire: false, selfRight: false });
+    const seconds = 10;
+    run(world, seconds);
+
+    expect(weaponHits, 'the weapon never landed').toBeGreaterThan(0);
+    expect(weaponHits, 'strikes were billed per step, not per tooth').toBeLessThan(seconds / 0.075);
+    world.free();
+  });
+});
+
+describe('opponent AI behaviour', () => {
+  it('deploys the srimech when it is upside-down', () => {
+    const design = makeDefaultDesign();
+    design.chassisId = 'boxframe';
+    design.weaponId = 'wedge';
+    design.accessories = ['srimech'];
+    const stats = computeStats(design);
+    const { world, combat, bot } = solo(design);
+    const ai = new BotAI(bot, combat.arena, 'veteran', 99);
+    run(world, 1);
+
+    const chassis = (bot as unknown as { chassis: any }).chassis;
+    chassis.setRotation({ x: 1, y: 0, z: 0, w: 0 }, true);
+    chassis.setTranslation({ x: 0, y: stats.parts.chassis.height / 2 + 0.02, z: 0 }, true);
+    chassis.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    chassis.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    run(world, 1.2);
+    expect(bot.inverted).toBe(true);
+
+    let askedToSelfRight = false;
+    for (let i = 0; i < 120 && !askedToSelfRight; i++) {
+      const input = ai.update(1 / 60, null);
+      askedToSelfRight = input.selfRight;
+      for (let s = 0; s < 8; s++) world.step();
+    }
+    expect(askedToSelfRight, 'the AI never tried to right itself').toBe(true);
+    expect(ai.currentState).toBe('recover');
+    world.free();
+  });
+
+  it('backs out when it has been shoved into a wall and is going nowhere', () => {
+    const { world, combat, red, blue } = fight(
+      presetById('doorstop').design,
+      presetById('doorstop').design,
+    );
+    const ai = new BotAI(blue, combat.arena, 'champion', 7);
+
+    // Nose into the wall, then hold the throttle down against it.
+    const chassis = (blue as unknown as { chassis: any }).chassis;
+    chassis.setTranslation({ x: 0, y: 0.2, z: ARENA_HALF - 0.6 }, true);
+    chassis.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+    run(world, 0.5);
+
+    let reversed = false;
+    for (let i = 0; i < 400 && !reversed; i++) {
+      const input = ai.update(1 / 60, red);
+      blue.setInput(input);
+      if (input.throttle < -0.1) reversed = true;
+      for (let s = 0; s < 8; s++) world.step();
+    }
+    expect(reversed, 'the AI pushed at a wall forever').toBe(true);
+    world.free();
   });
 });

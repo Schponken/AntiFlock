@@ -326,6 +326,7 @@ describe('debris', () => {
     const combat = new Combat(world, { headless: true });
     combat.start();
 
+    const baseBodies = world.world.bodies.len();
     for (let i = 0; i < 60; i++) {
       combat.debris.spawnPanel({
         position: new THREE.Vector3(0, 1 + i * 0.01, 0),
@@ -345,8 +346,13 @@ describe('debris', () => {
     run(world, 1);
     expect(combat.debris.count).toBeLessThanOrEqual(MAX_DEBRIS_PIECES);
 
-    // ...and the pieces have to be real bodies in the world, not just a counter.
-    expect(world.world.bodies.len()).toBeGreaterThanOrEqual(MAX_DEBRIS_PIECES);
+    /*
+     * ...and the pieces have to be real bodies, exactly as many as the counter
+     * claims. `>=` passed both when nothing had spawned and when recycled pieces
+     * leaked their bodies, which is precisely the pair of failures the recycling
+     * exists to prevent. The delta is two-sided and catches both.
+     */
+    expect(world.world.bodies.len() - baseBodies).toBe(MAX_DEBRIS_PIECES);
     world.free();
   });
 });

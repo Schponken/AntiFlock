@@ -65,7 +65,17 @@ export class StartSequence {
     const { audio, announcer, lights, camera, stage, red, blue } = this.ctx;
 
     const weightOf = (bot: Bot) => `${Math.round(kgToLb(bot.stats.totalMass))} pounds`;
-    const weaponOf = (bot: Bot) => bot.stats.parts.weapon.name.toLowerCase();
+    /*
+     * "with a undercutter blade" is the sort of thing a real announcer never says.
+     * The article follows the name, and the one weapon whose name is an
+     * abbreviation gets spelled out so the speech synthesiser does not read "CO2"
+     * as a word.
+     */
+    const weaponOf = (bot: Bot) => {
+      const name = bot.stats.parts.weapon.name;
+      const spoken = name.replace(/^CO2\b/, 'C O 2').toLowerCase();
+      return `${/^[aeiou]/i.test(name) ? 'an' : 'a'} ${spoken}`;
+    };
 
     this.timeline
       // --- Blackout -------------------------------------------------------
@@ -119,7 +129,7 @@ export class StartSequence {
           kind: 'intro',
         });
         announcer.say(
-          `In the red square, weighing in at ${weightOf(red)}, with a ${weaponOf(red)} — ${red.name}!`,
+          `In the red square, weighing in at ${weightOf(red)}, with ${weaponOf(red)} — ${red.name}!`,
         );
         this.spotlight(red);
         audio.crowdPop(0.7);
@@ -134,7 +144,7 @@ export class StartSequence {
           kind: 'intro',
         });
         announcer.say(
-          `And in the blue square, at ${weightOf(blue)}, with a ${weaponOf(blue)} — ${blue.name}!`,
+          `And in the blue square, at ${weightOf(blue)}, with ${weaponOf(blue)} — ${blue.name}!`,
         );
         this.spotlight(blue);
         audio.crowdPop(0.7);

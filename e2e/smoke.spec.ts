@@ -149,14 +149,41 @@ test.describe('AntiFlock', () => {
       )
       .toBe('fighting');
 
-    const stepsBefore = await page.evaluate(
-      () => (globalThis as Record<string, any>).__antiflock.match.world.stepCount as number,
-    );
+    const before = await page.evaluate(() => {
+      const match = (globalThis as Record<string, any>).__antiflock.match;
+      const position = match.player.position();
+      const forward = match.player.forward();
+      return {
+        stepCount: match.world.stepCount as number,
+        position: [position.x, position.y, position.z] as [number, number, number],
+        forward: [forward.x, 0, forward.z] as [number, number, number],
+      };
+    });
+    const stepsBefore = before.stepCount;
 
-    // Drive for a few seconds with the weapon running.
+    /*
+     * Drive with the weapon running, until the *simulation* has advanced — not
+     * until a wall clock has.
+     *
+     * This machine runs WebGL on the CPU at about a frame a second, and the loop
+     * caps catch-up at 24 fixed steps per frame, so six seconds of wall time is a
+     * fraction of a second of simulated driving. Waiting on the solver's own step
+     * counter makes the test measure the drivetrain instead of the frame rate.
+     */
     await page.keyboard.down('KeyW');
     await page.keyboard.down('ShiftLeft');
-    await page.waitForTimeout(6000);
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(
+            (from) =>
+              ((globalThis as Record<string, any>).__antiflock.match.world.stepCount as number) -
+              from,
+            stepsBefore,
+          ),
+        { timeout: 90_000, message: 'the solver never advanced three seconds of fight' },
+      )
+      .toBeGreaterThan(3 * 480);
     await page.keyboard.up('KeyW');
     await page.keyboard.up('ShiftLeft');
 
@@ -168,6 +195,10 @@ test.describe('AntiFlock', () => {
         state: match.getState(),
         remaining: match.timeRemaining,
         playerY: match.player.position().y,
+        playerPosition: (() => {
+          const p = match.player.position();
+          return [p.x, p.y, p.z] as [number, number, number];
+        })(),
         playerOmega: Math.abs(match.player.omega),
         opponentMoved: match.opponent.position().length(),
         stepCount: match.world.stepCount,
@@ -192,6 +223,24 @@ test.describe('AntiFlock', () => {
     expect(telemetry!.opponentMoved, 'the opponent never left its start square').toBeGreaterThan(
       0.5,
     );
+
+    /*
+     * The player's own controls, end to end: keyboard to input manager to
+     * drivetrain to displacement.
+     *
+     * Nothing in either suite observed this. The drive mapping could be reversed,
+     * or the key handler detached entirely, and every gate stayed green — because
+     * this test held W for six seconds and then asserted only that the clock was
+     * running and the machine had not been launched into orbit.
+     */
+    const travelled = [
+      telemetry!.playerPosition[0] - before.position[0],
+      telemetry!.playerPosition[2] - before.position[2],
+    ];
+    const distance = Math.hypot(travelled[0]!, travelled[1]!);
+    expect(distance, 'holding W moved the machine nowhere').toBeGreaterThan(0.5);
+    const alongNose = travelled[0]! * before.forward[0]! + travelled[1]! * before.forward[2]!;
+    expect(alongNose, 'holding W drove the machine backwards').toBeGreaterThan(distance * 0.4);
 
     expect(errors, errors.join('\n---\n')).toEqual([]);
   });

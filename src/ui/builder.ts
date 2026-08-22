@@ -452,7 +452,7 @@ export class Builder {
       this.optionsPane.append(
         el('p', {
           class: 'muted',
-          text: `A ${weapon.name.toLowerCase()} has no rotor, so there is no rotor material to choose.`,
+          text: `${/^[aeiou]/i.test(weapon.name) ? 'An' : 'A'} ${weapon.name.toLowerCase()} has no rotor, so there is no rotor material to choose.`,
         }),
       );
       return;

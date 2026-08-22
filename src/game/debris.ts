@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { PhysicsWorld } from '../physics/world.ts';
 import { DEBRIS_GROUPS } from '../physics/groups.ts';
-import { makeMetalTexture } from '../render/textures.ts';
+import { makeMetalTexture, makeTyreTexture } from '../render/textures.ts';
 import { fxRng } from '../core/rng.ts';
 
 /** Hard cap. Beyond this the oldest piece is removed to make room. */
@@ -195,7 +195,14 @@ export class Debris {
 
   private wheelMat(): THREE.MeshStandardMaterial {
     if (!this.wheelMaterial) {
+      // The same tread the attached wheels wear. A wheel that reads as rubber
+      // while it is bolted on should not turn into a smooth puck when it comes
+      // off; the texture is already cached, so this costs nothing.
+      const tyre = makeTyreTexture();
       this.wheelMaterial = new THREE.MeshStandardMaterial({
+        map: tyre.map,
+        normalMap: tyre.normalMap,
+        roughnessMap: tyre.roughnessMap,
         color: 0x24272b,
         metalness: 0.1,
         roughness: 0.88,

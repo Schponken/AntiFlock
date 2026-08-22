@@ -278,7 +278,16 @@ export class Arena {
     }
 
     // Corner posts.
-    const postMat = new THREE.MeshStandardMaterial({ color: 0x1d2126, metalness: 0.8, roughness: 0.5 });
+    // Textured like every other structural member in the box. These were the only
+    // flat-shaded metal in the arena, which read as untextured next to the rails.
+    const postMaps = makeMetalTexture(0x1d2126, 12);
+    const postMat = new THREE.MeshStandardMaterial({
+      map: postMaps.map,
+      normalMap: postMaps.normalMap,
+      roughnessMap: postMaps.roughnessMap,
+      metalness: 0.8,
+      roughness: 0.5,
+    });
     for (const sx of [-1, 1]) {
       for (const sz of [-1, 1]) {
         const post = new THREE.Mesh(

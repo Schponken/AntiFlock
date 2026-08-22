@@ -249,8 +249,17 @@ function buildRotor(
       const pocket = registry.geometry(
         new THREE.CylinderGeometry(radius * 0.17, radius * 0.17, thickness * 1.02, 14),
       );
+      // Machined metal, not a flat colour: these are recesses cut into the same
+      // billet as the disc, and they were the one part of the rotor with no maps.
+      const pocketMaps = makeMetalTexture(0x5c626b, 9);
       const pocketMat = registry.material(
-        new THREE.MeshStandardMaterial({ color: 0x5c626b, metalness: 0.6, roughness: 0.8 }),
+        new THREE.MeshStandardMaterial({
+          map: pocketMaps.map,
+          normalMap: pocketMaps.normalMap,
+          roughnessMap: pocketMaps.roughnessMap,
+          metalness: 0.6,
+          roughness: 0.8,
+        }),
       );
       for (let i = 0; i < 5; i++) {
         const a = (i / 5) * Math.PI * 2;

@@ -100,16 +100,32 @@ function makePool(capacity: number, map: THREE.Texture, blending: THREE.Blending
 export class Fx {
   readonly group = new THREE.Group();
 
-  private sparks: Pool;
-  private smoke: Pool;
+  private sparks: Pool | null;
+  private smoke: Pool | null;
   private scorches: THREE.Mesh[] = [];
   private scorchCursor = 0;
 
   /** Accumulated camera shake, consumed by the camera rig each frame. */
   private shake = 0;
 
-  constructor() {
+  private headless: boolean;
+
+  /**
+   * `headless` builds no sprites, pools or scorch decals.
+   *
+   * Every one of those needs a 2D canvas, which is what made `Match` — and with it
+   * the whole fight lifecycle, the knockout hand-off included — impossible to test
+   * without a browser. Each public method short-circuits, so callers do not have
+   * to know.
+   */
+  constructor(options: { headless?: boolean } = {}) {
+    this.headless = options.headless ?? false;
     this.group.name = 'fx';
+    if (this.headless) {
+      this.sparks = null;
+      this.smoke = null;
+      return;
+    }
     this.sparks = makePool(SPARK_CAPACITY, makeSparkSprite(), THREE.AdditiveBlending);
     this.smoke = makePool(SMOKE_CAPACITY, makeSmokeSprite(), THREE.NormalBlending);
     this.group.add(this.sparks.points);
@@ -174,6 +190,7 @@ export class Fx {
    * normal with a wide spread — grinding steel throws sparks everywhere.
    */
   sparkBurst(position: THREE.Vector3, normal: THREE.Vector3, intensity: number): void {
+    if (this.headless) return;
     const strength = clamp01(intensity);
     const count = Math.round(12 + strength * 90);
     const speed = 4 + strength * 16;
@@ -194,7 +211,7 @@ export class Fx {
       this.tmpColor.setRGB(1, 0.45 + heat * 0.5, 0.08 + heat * 0.32);
 
       this.emit(
-        this.sparks,
+        this.sparks!,
         position,
         direction,
         this.tmpColor,
@@ -208,6 +225,7 @@ export class Fx {
 
   /** Smoke from a damaged machine or a heavy hit. */
   smokePuff(position: THREE.Vector3, intensity: number): void {
+    if (this.headless) return;
     const strength = clamp01(intensity);
     const count = Math.round(2 + strength * 9);
     for (let i = 0; i < count; i++) {
@@ -215,7 +233,7 @@ export class Fx {
       const shade = fxRng.range(0.16, 0.4);
       this.tmpColor.setRGB(shade, shade, shade * 1.05);
       this.emit(
-        this.smoke,
+        this.smoke!,
         position,
         this.tmpVec,
         this.tmpColor,
@@ -227,6 +245,7 @@ export class Fx {
 
   /** Leave a permanent-ish mark on the floor where something big happened. */
   scorch(position: THREE.Vector3, radius: number): void {
+    if (this.headless) return;
     const mesh = this.scorches[this.scorchCursor]!;
     this.scorchCursor = (this.scorchCursor + 1) % SCORCH_CAPACITY;
     mesh.position.set(position.x, 0.006, position.z);
@@ -242,10 +261,15 @@ export class Fx {
   }
 
   update(dt: number): void {
+    if (this.headless) {
+      // The shake still has to decay: the camera reads it every frame.
+      this.shake = Math.max(0, this.shake - dt * 2.4);
+      return;
+    }
     this.shake = Math.max(0, this.shake - dt * 2.4);
 
-    this.integrate(this.sparks, dt, -22, 0.5);
-    this.integrate(this.smoke, dt, 1.4, 1.6);
+    this.integrate(this.sparks!, dt, -22, 0.5);
+    this.integrate(this.smoke!, dt, 1.4, 1.6);
 
     // Scorch marks fade very slowly, so the floor tells the story of the fight.
     for (const mesh of this.scorches) {
@@ -297,7 +321,11 @@ export class Fx {
 
   /** Wipe every particle, e.g. between matches. */
   reset(): void {
-    for (const pool of [this.sparks, this.smoke]) {
+    if (this.headless) {
+      this.shake = 0;
+      return;
+    }
+    for (const pool of [this.sparks!, this.smoke!]) {
       pool.life.fill(0);
       pool.alphas.fill(0);
       pool.geometry.attributes.alpha!.needsUpdate = true;
@@ -307,7 +335,8 @@ export class Fx {
   }
 
   dispose(): void {
-    for (const pool of [this.sparks, this.smoke]) {
+    if (this.headless) return;
+    for (const pool of [this.sparks!, this.smoke!]) {
       pool.geometry.dispose();
       (pool.points.material as THREE.Material).dispose();
     }

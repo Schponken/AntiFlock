@@ -71,6 +71,16 @@ export interface MatchOptions {
   roundSeconds?: number;
   /** Skip the show open and start fighting immediately. */
   quickStart?: boolean;
+  /**
+   * Run the match logic with no meshes.
+   *
+   * The fight, the clock, the knockout hand-off and the judges' cards are all
+   * plain bookkeeping, and none of it needs a GPU — but `Match` was reachable only
+   * through a real `Stage`, so none of it was testable. `onKnockout`, the hand-off
+   * from the primary win condition to the results screen, could be deleted with
+   * every gate green.
+   */
+  headless?: boolean;
   seed?: number;
 }
 
@@ -79,12 +89,13 @@ export class Match {
   readonly world: PhysicsWorld;
   readonly combat: Combat;
   readonly lights = new LightRig();
-  readonly fx = new Fx();
+  readonly fx: Fx;
   readonly camera: CameraDirector;
   readonly player: Bot;
   readonly opponent: Bot;
 
   private stage: Stage;
+  private headless: boolean;
   private ai: BotAI;
   private startSequence: StartSequence;
   private state: MatchState = 'intro';
@@ -106,10 +117,12 @@ export class Match {
 
   constructor(options: MatchOptions) {
     this.stage = options.stage;
+    this.fx = new Fx({ headless: options.headless ?? false });
     this.roundSeconds = options.roundSeconds ?? MATCH_DURATION;
     this.remaining = this.roundSeconds;
     this.world = new PhysicsWorld();
-    this.combat = new Combat(this.world);
+    this.headless = options.headless ?? false;
+    this.combat = new Combat(this.world, { headless: this.headless });
     this.camera = options.camera;
 
     this.player = this.combat.addBot(options.playerDesign, 0);
@@ -121,9 +134,11 @@ export class Match {
       options.seed ?? 20240815,
     );
 
-    this.stage.scene.add(this.combat.group);
-    this.stage.scene.add(this.lights.group);
-    this.stage.scene.add(this.fx.group);
+    if (!this.headless) {
+      this.stage.scene.add(this.combat.group);
+      this.stage.scene.add(this.lights.group);
+      this.stage.scene.add(this.fx.group);
+    }
 
     this.startSequence = new StartSequence({
       audio,
@@ -517,9 +532,11 @@ export class Match {
     for (const voice of this.voices.values()) voice.stop();
     this.voices.clear();
 
-    this.stage.scene.remove(this.combat.group);
-    this.stage.scene.remove(this.lights.group);
-    this.stage.scene.remove(this.fx.group);
+    if (!this.headless) {
+      this.stage.scene.remove(this.combat.group);
+      this.stage.scene.remove(this.lights.group);
+      this.stage.scene.remove(this.fx.group);
+    }
 
     this.combat.dispose();
     this.fx.dispose();

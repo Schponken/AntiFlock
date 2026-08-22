@@ -55,7 +55,23 @@ export class InputManager {
     if (!(target instanceof globalThis.HTMLElement)) return false;
     if (target.isContentEditable) return true;
     const tag = target.tagName;
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'OPTION';
+    /*
+     * Buttons are in this list too, and deliberately.
+     *
+     * Space is bound to `fire`, and cancelling it anywhere in the propagation path
+     * cancels a focused `<button>`'s activation — so the space bar could not press
+     * ENTER THE BOX, FIGHT, or any other button in the application. A control that
+     * has focus owns its keystrokes; the fight has no focused control.
+     */
+    return (
+      tag === 'INPUT' ||
+      tag === 'TEXTAREA' ||
+      tag === 'SELECT' ||
+      tag === 'OPTION' ||
+      tag === 'BUTTON' ||
+      tag === 'SUMMARY' ||
+      tag === 'A'
+    );
   }
 
   private onKeyDown = (event: KeyboardEvent): void => {
