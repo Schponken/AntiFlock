@@ -451,7 +451,14 @@ class App {
     this.hud.detach();
 
     const body: HTMLElement[] = [];
-    if (outcome && outcome.kind !== 'draw') {
+    if (outcome?.kind === 'draw') {
+      // A fight neither machine did anything in still gets a card and a report.
+      body.push(
+        el('span', { class: 'eyebrow', text: 'Judges’ decision' }),
+        el('h2', { class: 'results__winner', text: 'Draw' }),
+        el('p', { class: 'muted', text: 'Nothing on the cards separated them.' }),
+      );
+    } else if (outcome) {
       body.push(
         el('span', { class: 'eyebrow', text: outcome.kind === 'ko' ? 'Knockout' : 'Judges’ decision' }),
         el('h2', { class: 'results__winner', text: outcome.winner.design.name }),
@@ -503,6 +510,9 @@ class App {
         );
       }
 
+    }
+
+    if (outcome) {
       // Post-fight damage report for the player's machine.
       const player = this.match!.player;
       const lost = player.damage.parts.filter((p) => p.destroyed);
@@ -627,18 +637,35 @@ const canvas = document.getElementById('viewport') as HTMLCanvasElement | null;
 const uiRoot = document.getElementById('ui-root');
 
 if (canvas && uiRoot) {
-  const app = new App(canvas, uiRoot);
-  void app.start().catch((error: unknown) => {
+  const fail = (error: unknown): void => {
     console.error('AntiFlock failed to start', error);
     uiRoot.append(
       el(
         'section',
         { class: 'screen screen--center' },
         el('h2', { text: 'Could not start' }),
+        el('p', {
+          class: 'muted',
+          text: 'This machine could not open a WebGL 2 context. Check that hardware acceleration is enabled and that the browser is up to date.',
+        }),
         el('p', { class: 'muted', text: String(error) }),
       ),
     );
-  });
-  // Expose for the end-to-end smoke test.
-  (globalThis as unknown as { __antiflock?: unknown }).__antiflock = app;
+  };
+
+  /*
+   * The App constructor is inside the guard too, and that is the whole point.
+   * It builds the WebGLRenderer, which throws synchronously on a machine with no
+   * usable GPU context — before `start()` is ever reached — so the friendly
+   * failure screen that was written for exactly that case could never be shown
+   * for exactly that case. The user got a blank black page and a console trace.
+   */
+  try {
+    const app = new App(canvas, uiRoot);
+    void app.start().catch(fail);
+    // Expose for the end-to-end smoke test.
+    (globalThis as unknown as { __antiflock?: unknown }).__antiflock = app;
+  } catch (error) {
+    fail(error);
+  }
 }

@@ -9,6 +9,19 @@
  */
 
 /** Heavyweight class: 250 lb. */
+/**
+ * How far a crushing jaw actually sinks into a target on one bite, in metres.
+ *
+ * A clamp's rating is a force, not an energy, so it needs a stroke to become
+ * work. That stroke is not the jaw's sweep — the jaw travels half a metre through
+ * fresh air and then does all of its damage in the last few centimetres, once the
+ * teeth are through the skin and into the frame. Thirty millimetres is what a
+ * real hydraulic crusher takes out of a 6 mm plate before the frame behind it
+ * stops the jaw, and `force * stroke` then gives a per-bite energy on the same
+ * scale as a spinner's stored energy, which is what makes the two comparable.
+ */
+export const CLAMP_BITE_STROKE_M = 0.03;
+
 export const WEIGHT_LIMIT_KG = 113.398;
 
 export type WeaponKind =
@@ -42,6 +55,17 @@ export interface MaterialSpec {
   toughness: number;
   /** 0 = shatters and sheds fragments, 1 = deforms and stays attached. */
   ductility: number;
+  /**
+   * Surface hardness, 0-1, roughly Brinell normalised to hardened tool steel.
+   *
+   * Distinct from toughness, and the pair of them is what separates real armour
+   * materials from each other. Toughness is how much energy the plate absorbs
+   * before it fails; hardness is whether a tooth can get into it at all. A hard
+   * face makes a weapon skate instead of bite, and it is what takes the teeth off
+   * a spinner — the classic reason a team bolts hardened steel to the front of a
+   * machine even though it costs them a third of their weight budget.
+   */
+  hardness: number;
   /** Surface friction against the arena floor and other bots. */
   friction: number;
   /** How much of an impact bounces back rather than being absorbed. */
@@ -61,6 +85,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 970,
     toughness: 5200,
     ductility: 0.95,
+    hardness: 0.02,
     friction: 0.55,
     restitution: 0.32,
     costPerKg: 6,
@@ -75,6 +100,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 935,
     toughness: 6400,
     ductility: 0.98,
+    hardness: 0.02,
     friction: 0.22,
     restitution: 0.28,
     costPerKg: 11,
@@ -89,6 +115,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 2810,
     toughness: 9800,
     ductility: 0.55,
+    hardness: 0.3,
     friction: 0.62,
     restitution: 0.36,
     costPerKg: 24,
@@ -103,6 +130,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 7850,
     toughness: 21500,
     ductility: 0.72,
+    hardness: 0.95,
     friction: 0.68,
     restitution: 0.28,
     costPerKg: 9,
@@ -117,6 +145,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 4430,
     toughness: 24800,
     ductility: 0.8,
+    hardness: 0.62,
     friction: 0.6,
     restitution: 0.34,
     costPerKg: 140,
@@ -131,6 +160,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 7800,
     toughness: 19200,
     ductility: 0.68,
+    hardness: 0.88,
     friction: 0.66,
     restitution: 0.3,
     costPerKg: 8,
@@ -145,6 +175,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 7830,
     toughness: 26500,
     ductility: 0.45,
+    hardness: 0.98,
     friction: 0.64,
     restitution: 0.45,
     costPerKg: 34,
@@ -159,6 +190,7 @@ export const MATERIALS: readonly MaterialSpec[] = [
     density: 1600,
     toughness: 7100,
     ductility: 0.18,
+    hardness: 0.25,
     friction: 0.48,
     restitution: 0.4,
     costPerKg: 90,
@@ -543,7 +575,7 @@ export const WEAPONS: readonly WeaponSpec[] = [
     },
     bite: 0.92,
     cost: 2900,
-    blurb: 'Wide cage rotor. Less energy than a disc but it never misses low.',
+    blurb: 'Wide cage rotor. Slower at the tip than a disc but it carries more energy, and it never misses low.',
   },
   {
     id: 'horiz-bar',
@@ -831,8 +863,21 @@ export function rotorInertia(spec: WeaponSpec, material: MaterialSpec): number {
   if (!r) return 0;
   const m = rotorMass(spec, material);
   switch (r.shape) {
-    case 'disc':
-      return 0.5 * m * r.radius * r.radius;
+    case 'disc': {
+      /*
+       * A pocketed disc, not a solid one.
+       *
+       * `fill` has already taken the pocketed metal out of the mass, and the whole
+       * point of pocketing a weapon disc is that the metal you remove comes from
+       * near the hub, where it contributes almost nothing. Charging that reduced
+       * mass the *solid* disc's r^2/2 threw the benefit away and under-reported
+       * every disc's stored energy. Treating what is left as an annulus of the
+       * same outer radius gives the hollow radius from the fill directly:
+       * pi(r^2 - ri^2) = f.pi.r^2, so ri^2 = r^2(1 - f), and I = m(r^2 + ri^2)/2.
+       */
+      const innerSq = r.radius * r.radius * Math.max(0, 1 - r.fill);
+      return 0.5 * m * (r.radius * r.radius + innerSq);
+    }
     case 'bar':
       return (1 / 12) * m * r.span * r.span;
     case 'drum':
@@ -870,11 +915,15 @@ export function rotorInertiaTensor(
 
   switch (r.shape) {
     case 'disc':
-    case 'ring':
       // Perpendicular axis theorem: a flat rotor's transverse inertia is half its spin inertia.
       transverse = spin * 0.5;
       break;
+    case 'ring':
     case 'drum':
+      // Not flat: a cage or a drum is 340 mm long, and the perpendicular axis
+      // theorem does not apply to it. Its transverse inertia is the flat-rotor
+      // term plus the stick term for its own length, exactly as for the drum —
+      // ignoring the span under-reported an eggbeater's by more than a third.
       transverse = spin * 0.5 + (1 / 12) * m * r.span * r.span;
       break;
     case 'bar':
@@ -883,11 +932,20 @@ export function rotorInertiaTensor(
       break;
   }
 
+  /*
+   * Exactly one axis carries the spin inertia; the other two are transverse.
+   *
+   * Both non-default branches were wrong: `z` was a verbatim copy of `y`, so a
+   * z-axis rotor's spin inertia was written onto Y and its transverse onto Z, and
+   * `y` put `spin` on Z as well — giving a horizontal bar fifty times the real
+   * transverse inertia. That is the term the gyroscopic model reads, so the
+   * machines it should make lean hardest were the ones it barely touched.
+   */
   switch (r.axis) {
     case 'y':
-      return { x: transverse, y: spin, z: spin };
+      return { x: transverse, y: spin, z: transverse };
     case 'z':
-      return { x: transverse, y: spin, z: spin };
+      return { x: transverse, y: transverse, z: spin };
     case 'x':
     default:
       return { x: spin, y: transverse, z: transverse };

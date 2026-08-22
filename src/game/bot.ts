@@ -22,7 +22,7 @@ import { buildBotVisual, wedgeDimensions, type BotVisual } from '../render/botMe
 import { BotDamage, type ArmorFace } from './damage.ts';
 import { computeStats, type BotDesign, type DerivedStats } from './design.ts';
 import { DRIVETRAIN_EFFICIENCY } from './design.ts';
-import { rotorInertiaTensor } from './parts.ts';
+import { rotorInertiaTensor, type WeaponSpec } from './parts.ts';
 import { clamp, clamp01, damp } from '../core/mathx.ts';
 
 export interface BotInput {
@@ -49,6 +49,20 @@ export const NEUTRAL_INPUT: BotInput = {
 /** How far the wheel hangs below its hard point at rest. */
 const SUSPENSION_REST = 0.04;
 const SUSPENSION_TRAVEL = 0.03;
+
+/**
+ * How far the suspension is allowed to settle under the machine's own weight.
+ *
+ * Rapier's raycast suspension produces a static compression of `g / (n * k)`,
+ * where `n` is the number of wheels sharing the load and `k` the per-wheel
+ * stiffness. That expression has no mass in it, so a single hard-coded `k` gives
+ * a two-wheel machine twice the sag of a four-wheel one — and at k = 90 that sag
+ * (54 mm on two wheels) is larger than any chassis' ground clearance, which
+ * parks every frame on its belly with the wheels hanging in the air. Solving for
+ * `k` from the sag we actually want keeps the ride height correct on 2, 4 and 6
+ * wheels alike, exactly as a real builder picks springs to suit the corner load.
+ */
+const SUSPENSION_SAG = 0.005;
 
 /** Lateral grip of a driven wheel, as a fraction of its forward grip. */
 const SIDE_FRICTION = 0.06;
@@ -98,6 +112,8 @@ export class Bot {
   private wheelDead: boolean[] = [];
   private wheelRestRadius: number[] = [];
   private wheelSpin: number[] = [];
+  /** Body-frame height of the suspension hard points the right way up. */
+  private hardPointY = 0;
 
   /** Live weapon spin, radians per second, signed. */
   private _omega = 0;
@@ -116,7 +132,6 @@ export class Bot {
 
   private tmpVec = new THREE.Vector3();
   private tmpQuat = new THREE.Quaternion();
-  private tmpMat = new THREE.Matrix4();
 
   constructor(options: {
     world: PhysicsWorld;
@@ -151,9 +166,28 @@ export class Bot {
     this.chassis = rapierWorld.createRigidBody(bodyDesc);
 
     const groups = bodyGroups(team);
-    // The frame plus its armour: most of the mass, centred on the body.
-    const hullMass =
-      chassisSpec.frameMass + this.stats.armorMass + weapon.mountMass;
+    const hasWedge =
+      weapon.kind === 'wedge' || this.stats.parts.accessories.includes('forks');
+    /*
+     * The frame plus its armour: most of the mass, centred on the body.
+     *
+     * Everything that is modelled as its own collider or its own rigid body has to
+     * come *out* of here, or the machine the solver simulates is heavier than the
+     * machine the builder weighed against the 250 lb limit — by up to 9.7 kg for
+     * an actuator weapon with a wedge, which is a whole armour package of cheating.
+     * `computeStats().totalMass` is the contract; these deductions are what keep
+     * the sum of every collider equal to it. (The rotor's mass is not deducted:
+     * `stats.rotorMassKg` is a separate line in the builder's total and lives on
+     * the weapon body.)
+     */
+    const hullMass = Math.max(
+      1,
+      chassisSpec.frameMass +
+        this.stats.armorMass +
+        weapon.mountMass -
+        actuatorMovingMass(weapon) -
+        (hasWedge ? WEDGE_COLLIDER_MASS : 0),
+    );
     const hull = RAPIER.ColliderDesc.roundCuboid(
       chassisSpec.width / 2 - 0.01,
       chassisSpec.height / 2 - 0.01,
@@ -194,12 +228,12 @@ export class Bot {
     });
 
     // A front wedge is a real, load-bearing part of the machine.
-    if (weapon.kind === 'wedge' || this.stats.parts.accessories.includes('forks')) {
+    if (hasWedge) {
       const wedgeDesc = RAPIER.ColliderDesc.convexHull(wedgeHullPoints(chassisSpec))!;
       if (wedgeDesc) {
         wedgeDesc
           .setTranslation(0, -chassisSpec.height / 2, chassisSpec.length / 2 - 0.01)
-          .setMass(2.5)
+          .setMass(WEDGE_COLLIDER_MASS)
           // Ground-scraping forks are polished titanium sliding on steel. They have
           // to be genuinely slippery: give them tyre-like grip and the machine
           // anchors itself on its own wedge and can barely turn.
@@ -225,6 +259,9 @@ export class Bot {
 
     const wheelLocalY = wheel.radius - chassisSpec.height / 2 - chassisSpec.groundClearance;
     const hardPointY = wheelLocalY + SUSPENSION_REST;
+    this.hardPointY = hardPointY;
+    // Springs sized for the corner load, not a magic number. See SUSPENSION_SAG.
+    const suspensionStiffness = 9.81 / (chassisSpec.wheelCount * SUSPENSION_SAG);
     const halfTrack = chassisSpec.width / 2 - wheel.width * 0.15;
     const rows = chassisSpec.wheelCount / 2;
     const usableLength = chassisSpec.length / 2 - wheel.radius - 0.03;
@@ -241,7 +278,7 @@ export class Bot {
         wheel.radius,
       );
       // Combat robots run essentially rigid: stiff springs, almost no travel.
-      this.vehicle.setWheelSuspensionStiffness(i, 90);
+      this.vehicle.setWheelSuspensionStiffness(i, suspensionStiffness);
       this.vehicle.setWheelSuspensionCompression(i, 3.6);
       this.vehicle.setWheelSuspensionRelaxation(i, 2.8);
       this.vehicle.setWheelMaxSuspensionTravel(i, SUSPENSION_TRAVEL);
@@ -378,6 +415,31 @@ export class Bot {
     return this.actuatorShotsLeft;
   }
 
+  /**
+   * Energy this machine's actuator or clamp can put into a target *right now*.
+   *
+   * Zero unless the arm is genuinely doing something. Previously the damage path
+   * simply read `stats.actuatorEnergy` off the spec sheet, which meant a flipper
+   * dealt its full rated charge to anything it brushed against — with the gas
+   * bottle empty, with the arm parked, with the driver never having pressed fire.
+   * A hammer that has not swung has delivered no work, and a jaw that is not
+   * closing is a bracket.
+   */
+  get actuatorStrikeEnergy(): number {
+    const weapon = this.stats.parts.weapon;
+    const condition = this.damage.weaponCondition;
+    if (condition <= 0.05) return 0;
+    if (weapon.clamp) {
+      // A crusher bites for as long as the driver holds the jaw shut.
+      return this.input.weapon ? this.stats.actuatorEnergy * condition : 0;
+    }
+    if (!weapon.actuator) return 0;
+    // Only while the arm is being driven out: the return stroke is not a strike.
+    return this.actuatorTarget > 0 && this.actuatorTimer > 0
+      ? this.stats.actuatorEnergy * condition
+      : 0;
+  }
+
   get speed(): number {
     const v = this.chassis.linvel();
     return Math.hypot(v.x, v.z);
@@ -469,14 +531,34 @@ export class Bot {
     this._inverted = up.y < -0.15;
 
     if (this._inverted !== wasInverted) {
-      // An invertible frame simply drives the other way up: the wheels stick out
-      // past both faces, so the suspension raycast has to flip with it.
+      /*
+       * An invertible frame simply drives the other way up: the wheels stick out
+       * past both faces, so the suspension raycast has to flip with it.
+       *
+       * Flipping the ray direction alone is not enough, and that was the bug.
+       * The hard point stays where it was — below the deck in body coordinates —
+       * so an upside-down machine casts its suspension rays *upwards from a point
+       * that is now above the chassis*, every ray misses the floor, and the bot
+       * sits on its armour with all four wheels reporting no contact. Rolling the
+       * frame 180 degrees about its long axis maps body y to -y, so the mirrored
+       * hard point is simply -hardPointY; the wheel centre then lands at the same
+       * height above the floor it had the right way up.
+       */
       const canRunInverted = this.stats.invertible;
-      const dir = this._inverted && canRunInverted ? 1 : -1;
+      const runningInverted = this._inverted && canRunInverted;
+      const dir = runningInverted ? 1 : -1;
       for (let i = 0; i < this.wheelDead.length; i++) {
         this.vehicle.setWheelDirectionCs(i, { x: 0, y: dir, z: 0 });
+        const connection = this.vehicle.wheelChassisConnectionPointCs(i);
+        if (connection) {
+          this.vehicle.setWheelChassisConnectionPointCs(i, {
+            x: connection.x,
+            y: runningInverted ? -this.hardPointY : this.hardPointY,
+            z: connection.z,
+          });
+        }
       }
-      this.invertedDriveSign = this._inverted && canRunInverted ? -1 : 1;
+      this.invertedDriveSign = runningInverted ? -1 : 1;
     }
   }
 
@@ -489,14 +571,30 @@ export class Bot {
     const throttle = clamp(this.input.throttle, -1, 1) * this.invertedDriveSign;
     const steer = clamp(this.input.steer, -1, 1) * this.invertedDriveSign;
 
-    // Torque falls off as the motor approaches its free speed — that is what
-    // gives every build a genuine top speed instead of a hard cap.
+    /*
+     * Back-EMF, done with the sign the motor actually sees.
+     *
+     * A brushed DC motor makes tau = tau_stall * (1 - w/w_free), and `w` is
+     * signed: it is only opposing you when the machine is already moving the way
+     * you are asking it to go. Taking |speed| instead — and then only fading to
+     * 8% of stall — meant the advertised top speed was not a top speed at all.
+     * Nothing else in the model resists a rolling machine hard enough to hold it
+     * there, so builds simply kept accelerating past their own spec sheet.
+     *
+     * With the signed ratio the force genuinely reaches zero at the design free
+     * speed, and driving *against* the motion gets more than stall torque, which
+     * is both what a real motor does and what makes a skid-steer pivot crisply.
+     * The 1.35 ceiling is the current limit every real speed controller has.
+     */
     const speed = this.vehicle.currentVehicleSpeed();
-    const speedRatio = clamp01(Math.abs(speed) / Math.max(0.5, this.stats.topSpeed));
-    const availableForce = perWheelForce * (1 - speedRatio * 0.92);
+    const freeSpeed = Math.max(0.5, this.stats.topSpeed);
 
-    const left = clamp(throttle + steer, -1, 1);
-    const right = clamp(throttle - steer, -1, 1);
+    // With +Z forward and +Y up, the machine's own right-hand side is body -X —
+    // which is where the even-indexed wheels sit (`side = -1` at construction).
+    // Steering right therefore has to slow *those* wheels down; feeding them
+    // `throttle + steer` steered every machine in the game the wrong way.
+    const leftSideDrive = clamp(throttle + steer, -1, 1);
+    const rightSideDrive = clamp(throttle - steer, -1, 1);
     const braking = Math.abs(throttle) < 0.02 && Math.abs(steer) < 0.02;
 
     for (let i = 0; i < this.wheelDead.length; i++) {
@@ -505,8 +603,10 @@ export class Bot {
         this.vehicle.setWheelBrake(i, 0);
         continue;
       }
-      const side = i % 2 === 0 ? left : right;
-      this.vehicle.setWheelEngineForce(i, side * availableForce * mobility);
+      const demand = i % 2 === 0 ? rightSideDrive : leftSideDrive;
+      const ratio = demand === 0 ? 0 : clamp((speed * Math.sign(demand)) / freeSpeed, -1, 1);
+      const availableForce = perWheelForce * clamp(1 - ratio, 0, 1.35);
+      this.vehicle.setWheelEngineForce(i, demand * availableForce * mobility);
       this.vehicle.setWheelBrake(i, braking ? this.stats.totalMass * 1.4 : 0);
     }
 
@@ -515,7 +615,9 @@ export class Bot {
   }
 
   private trySelfRight(): void {
-    if (this.stats.invertible) return;
+    // An invertible frame does not *need* a srimech, but fitting one is legal and
+    // it still has to work: a machine wedged on its side, or pinned nose-down
+    // against a wall, is in a pose no amount of upside-down driving recovers from.
     if (!this.damage.srimechWorks) return;
     if (!this._inverted || this.srimechCooldown > 0) return;
 
@@ -724,12 +826,18 @@ export class Bot {
     this.visual.root.position.set(t.x, t.y, t.z);
     this.visual.root.quaternion.set(r.x, r.y, r.z, r.w);
 
-    // Wheels ride their suspension and spin at their true rolling rate.
-    this.tmpMat.compose(
-      this.visual.root.position,
-      this.visual.root.quaternion,
-      new THREE.Vector3(1, 1, 1),
-    );
+    /*
+     * Wheels ride their suspension and spin at their true rolling rate.
+     *
+     * The wheel groups are children of `root`, and `root` has just been given the
+     * chassis' world transform — so everything written here must be in *chassis*
+     * coordinates. Rapier hands back the connection point and ray direction in
+     * exactly that frame already, which is the whole point of the `Cs` suffix, so
+     * the hanging position drops straight in. (Composing them into world space
+     * first and assigning that to a child applied the body transform twice and
+     * flung the wheels out to roughly double the machine's distance from the
+     * origin, trailing behind it like a shed axle.)
+     */
     for (let i = 0; i < this.visual.wheels.length; i++) {
       const mesh = this.visual.wheels[i];
       if (!mesh || !mesh.visible) continue;
@@ -737,13 +845,12 @@ export class Bot {
       const direction = this.vehicle.wheelDirectionCs(i);
       const length = this.vehicle.wheelSuspensionLength(i) ?? SUSPENSION_REST;
       if (!connection || !direction) continue;
-      this.tmpVec.set(
+      mesh.position.set(
         connection.x + direction.x * length,
         connection.y + direction.y * length,
         connection.z + direction.z * length,
       );
-      mesh.position.copy(this.tmpVec).applyMatrix4(this.tmpMat);
-      mesh.quaternion.copy(this.visual.root.quaternion);
+      mesh.quaternion.identity();
 
       const rotation = this.vehicle.wheelRotation(i);
       if (rotation !== null) {
@@ -753,10 +860,19 @@ export class Bot {
     }
 
     if (this.visual.weaponPivot && this.weaponBody) {
+      // Same trap, one level worse: the weapon is a *separate* rigid body, so its
+      // pose is genuinely in world space and has to be pulled back into the
+      // chassis frame before it can be assigned to a child of `root`.
       const wt = this.weaponBody.translation();
       const wr = this.weaponBody.rotation();
-      this.visual.weaponPivot.position.set(wt.x, wt.y, wt.z);
-      this.visual.weaponPivot.quaternion.set(wr.x, wr.y, wr.z, wr.w);
+      this.tmpQuat.copy(this.visual.root.quaternion).invert();
+      this.tmpVec
+        .set(wt.x - t.x, wt.y - t.y, wt.z - t.z)
+        .applyQuaternion(this.tmpQuat);
+      this.visual.weaponPivot.position.copy(this.tmpVec);
+      this.visual.weaponPivot.quaternion
+        .set(wr.x, wr.y, wr.z, wr.w)
+        .premultiply(this.tmpQuat);
     }
 
     // Underglow brightens with weapon charge — a cheap, readable "it is armed" cue.
@@ -811,6 +927,26 @@ function wedgeHullPoints(chassis: { width: number; height: number }): Float32Arr
     hw, rise, 0,
   ]);
 }
+
+/**
+ * How much of an actuator or clamp weapon's mount mass is on the moving part.
+ *
+ * The builder quotes one number for the whole weapon assembly, and the solver has
+ * to spend exactly that number and no more. Splitting it here — rather than
+ * inventing a mass for each collider — is what keeps a machine's simulated weight
+ * equal to the weight the player was told they were within the limit with. (The
+ * arm, ram or paddle is the part that swings; the bottle, valves, regulator and
+ * mounting plates stay bolted to the frame, which is roughly this split on a real
+ * pneumatic flipper.)
+ */
+export function actuatorMovingMass(weapon: WeaponSpec): number {
+  if (weapon.rotor) return 0;
+  if (!weapon.actuator && !weapon.clamp) return 0;
+  return weapon.mountMass * 0.45;
+}
+
+/** Mass of the fixed front wedge / fork collider, when the build has one. */
+export const WEDGE_COLLIDER_MASS = 2.5;
 
 /**
  * Physics shapes matching the weapon that was drawn in botMesh.
@@ -878,19 +1014,22 @@ function weaponColliderDescs(stats: DerivedStats): RAPIER.ColliderDesc[] {
 
   const reach = weapon.actuator?.reach ?? weapon.clamp?.reach ?? 0.4;
   const width = stats.parts.chassis.width * 0.7;
+  const moving = actuatorMovingMass(weapon);
   if (weapon.kind === 'flipper') {
     const desc = RAPIER.ColliderDesc.cuboid(width / 2, 0.012, reach / 2);
     desc.setTranslation(0, 0, reach / 2);
-    desc.setMass(Math.max(2, weapon.mountMass * 0.3));
+    desc.setMass(moving);
     descs.push(desc);
   } else {
+    // An arm is mostly tip: the head carries the striking mass, the shaft carries
+    // the rest, and together they come to exactly `moving`.
     const shaft = RAPIER.ColliderDesc.cuboid(0.03, 0.03, reach / 2);
     shaft.setTranslation(0, 0, reach / 2);
-    shaft.setMass(Math.max(1.5, weapon.mountMass * 0.16));
+    shaft.setMass(moving * 0.4);
     descs.push(shaft);
     const head = RAPIER.ColliderDesc.cuboid(0.07, 0.06, 0.08);
     head.setTranslation(0, 0, reach);
-    head.setMass(Math.max(2, weapon.mountMass * 0.22));
+    head.setMass(moving * 0.6);
     descs.push(head);
   }
   return descs;

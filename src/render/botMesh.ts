@@ -24,6 +24,7 @@ import {
   chamferedPlate,
   flushBoltGeometry,
   hexBoltGeometry,
+  mergeGeometries,
   motorCan,
   pillowBlock,
   pulley,
@@ -162,7 +163,17 @@ function addTeeth(
     const tooth = new THREE.Mesh(geometry, material);
     if (axis === 'x') {
       tooth.position.set(0, Math.cos(angle) * radius, Math.sin(angle) * radius);
-      tooth.rotation.x = -angle;
+      /*
+       * Rx(t) takes the cylinder's own +Y axis to (0, cos t, sin t), which is the
+       * radial direction at angle +t — so a part sitting at +angle has to be
+       * rotated by +angle, not -angle. The negated version pointed every tooth at
+       * the mirror-image angle: 90 degrees out at the quarter positions and fully
+       * reversed at the top and bottom of the disc, which is why the teeth read as
+       * scattered debris rather than as a bolt circle. (`rotation.y` stays: with
+       * Three's XYZ order it is applied first, about the tooth's own axis, so it
+       * is a genuine roll that puts a corner rather than a flat face into the hit.)
+       */
+      tooth.rotation.x = angle;
       tooth.rotation.y = Math.PI / 4;
       bolts.push({
         position: new THREE.Vector3(
@@ -340,9 +351,15 @@ function buildRotor(
         const a = (i / teeth) * Math.PI * 2;
         const tooth = new THREE.Mesh(toothGeom, material);
         tooth.position.set(0, Math.cos(a) * radius * 0.99, Math.sin(a) * radius * 0.99);
-        tooth.rotation.x = -a;
-        tooth.rotation.z = Math.PI / 2;
-        tooth.rotation.y = Math.PI / 4;
+        /*
+         * A drum's teeth run the length of the drum, parallel to its axis. Rz lays
+         * the cylinder along -X, which is that axis, and Rx is then a pure roll
+         * about it — the `a` keeps each tooth square to its own radius and the
+         * quarter turn puts a corner outward. Setting `rotation.y` instead swung
+         * the tooth 45 degrees out of the drum entirely, because with the XYZ order
+         * Ry is applied *before* Rz and so acts on the untransformed part.
+         */
+        tooth.rotation.set(a + Math.PI / 4, 0, Math.PI / 2);
         tooth.castShadow = true;
         group.add(tooth);
       }
@@ -393,7 +410,7 @@ function buildRotor(
             (Math.cos(a) * radius * 0.9) / 2,
             (Math.sin(a) * radius * 0.9) / 2,
           );
-          spoke.rotation.x = -a;
+          spoke.rotation.x = a;
           group.add(spoke);
         }
       }
@@ -844,7 +861,29 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
     position: [number, number, number];
     rotation: [number, number, number];
     normal: THREE.Vector3;
+    /**
+     * Intervals along the panel's own local X to leave open, as [centre, half].
+     * Used to cut the wheel arches out of the side armour.
+     */
+    cutouts?: [number, number][];
   }
+
+  /*
+   * Where the wheels sit along the machine, in chassis Z — the same arithmetic
+   * the drivetrain uses in `Bot`, because the arches have to line up with the
+   * actual hard points and not with a guess.
+   */
+  const wheelRows = chassis.wheelCount / 2;
+  const usableLength = chassis.length / 2 - wheel.radius - 0.03;
+  const wheelZ: number[] = [];
+  for (let row = 0; row < wheelRows; row++) {
+    wheelZ.push(
+      wheelRows === 1 ? 0 : -usableLength + (2 * usableLength * row) / (wheelRows - 1),
+    );
+  }
+  // The side panel's local X runs along chassis Z, and the ±90 degree turn about
+  // Y reverses it — which does not matter here, because the arches are symmetric.
+  const wheelArches: [number, number][] = wheelZ.map((z) => [z, wheel.radius + 0.012]);
 
   // Panels are inset so the frame rails and corner posts stay visible around
   // them. That gap is the whole difference between "a painted box" and "plate
@@ -874,6 +913,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       position: [-hw - plate / 2, 0, 0],
       rotation: [0, -Math.PI / 2, 0],
       normal: new THREE.Vector3(-1, 0, 0),
+      cutouts: wheelArches,
     },
     {
       face: 'right',
@@ -882,6 +922,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       position: [hw + plate / 2, 0, 0],
       rotation: [0, Math.PI / 2, 0],
       normal: new THREE.Vector3(1, 0, 0),
+      cutouts: wheelArches,
     },
     {
       face: 'top',
@@ -905,11 +946,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
     // A panel is its own group so its fasteners come off with it when it is torn
     // away — armour and the bolts holding it are one part, physically.
     const panel = new THREE.Mesh(
-      chamferedPlate(registry, {
-        width: def.width,
-        height: def.height,
-        thickness: plate,
-      }),
+      panelGeometry(registry, def.width, def.height, plate, def.cutouts),
       registry.material(paintMat.clone()),
     );
     panel.position.set(...def.position);
@@ -1053,7 +1090,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       const a = (s / 5) * Math.PI * 2;
       const spoke = new THREE.Mesh(spokeGeom, machinedMat);
       spoke.position.set(0, Math.cos(a) * wheel.radius * 0.42, Math.sin(a) * wheel.radius * 0.42);
-      spoke.rotation.x = -a;
+      spoke.rotation.x = a;
       group.add(spoke);
     }
 
@@ -1145,7 +1182,10 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
         width: 0.024,
       });
       motorPulley.rotation.y = Math.PI / 2;
-      motorPulley.position.set(-beltSpan, -0.07, 0);
+      // The band's small wrap is built at local +x (`centerB`), and the motor can
+      // is hung on that side too; negating this put the pulley out on its own at
+      // the far end of the belt, with the belt visibly wrapping empty air.
+      motorPulley.position.set(beltSpan, -0.07, 0);
       beltGroup.add(motorPulley);
       body.add(beltGroup);
 
@@ -1254,4 +1294,57 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
     teamLight,
     dispose: () => registry.dispose(),
   };
+}
+
+/**
+ * A plate with the wheel arches cut out of it.
+ *
+ * Side armour was a solid slab running the whole length of the machine, and the
+ * tyres are a centimetre or two proud of the frame — so every wheel was buried
+ * halfway into its own armour, which no machine that has ever rolled out of a
+ * pit does. Real side plate is either cut around the wheels or stops short of
+ * them; this builds it as the segments that survive once the arches are removed,
+ * merged into one geometry so the panel stays a single part that comes off as a
+ * single part. Segments too narrow to be worth bolting on are dropped, which is
+ * also the right answer for a six-wheel frame with no room between the rows.
+ */
+function panelGeometry(
+  registry: GeometryRegistry,
+  width: number,
+  height: number,
+  thickness: number,
+  cutouts?: [number, number][],
+): THREE.BufferGeometry {
+  const plain = (w: number): THREE.BufferGeometry =>
+    chamferedPlate(registry, { width: w, height, thickness });
+  if (!cutouts || cutouts.length === 0) return plain(width);
+
+  // Walk the panel from one edge to the other, skipping every arch.
+  const half = width / 2;
+  const arches = [...cutouts].sort((a, b) => a[0] - b[0]);
+  const spans: [number, number][] = [];
+  let cursor = -half;
+  for (const [centre, radius] of arches) {
+    const from = centre - radius;
+    const to = centre + radius;
+    if (from > cursor) spans.push([cursor, Math.min(from, half)]);
+    cursor = Math.max(cursor, to);
+  }
+  if (cursor < half) spans.push([cursor, half]);
+
+  const minimum = Math.max(0.03, thickness * 4);
+  const pieces: THREE.BufferGeometry[] = [];
+  for (const [from, to] of spans) {
+    const w = to - from;
+    if (w < minimum) continue;
+    const piece = plain(w).clone();
+    piece.translate((from + to) / 2, 0, 0);
+    pieces.push(piece);
+  }
+
+  // A frame whose wheels leave nothing worth plating still needs *a* panel: fall
+  // back to the solid plate rather than handing back an empty part.
+  if (pieces.length === 0) return plain(width);
+  if (pieces.length === 1) return pieces[0]!;
+  return mergeGeometries(pieces);
 }

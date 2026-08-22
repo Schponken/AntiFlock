@@ -13,7 +13,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { clamp } from '../core/mathx.ts';
+import { clamp, damp } from '../core/mathx.ts';
 import {
   detectSoftwareRenderer,
   getRenderProfile,
@@ -37,6 +37,9 @@ export class Stage {
   private renderPass: RenderPass | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private quality: QualityLevel;
+  /** Current and target extra bloom strength, eased in `render`. */
+  private bloomBoost = 0;
+  private bloomBoostTarget = 0;
   private software = false;
   private envTexture: THREE.Texture | null = null;
 
@@ -177,7 +180,27 @@ export class Stage {
     this.quality = quality;
     setRenderProfile(quality, this.software);
     this.renderer.setPixelRatio(this.pixelRatio());
-    this.renderer.shadowMap.enabled = getRenderProfile().shadows;
+    const shadows = getRenderProfile().shadows;
+    const shadowsChanged = this.renderer.shadowMap.enabled !== shadows;
+    this.renderer.shadowMap.enabled = shadows;
+    /*
+     * Toggling `shadowMap.enabled` is not enough on its own.
+     *
+     * `shadowMapEnabled` is baked into the program cache key but is not one of the
+     * conditions Three checks in `needsProgramChange`, so materials compiled while
+     * shadows were on keep their `USE_SHADOWMAP` define — while the shadow pass
+     * stops running and stops refreshing the maps. The result of dropping to the
+     * low profile mid-session was every surface wearing the last shadow it saw,
+     * frozen in place. Flagging the materials forces the recompile that clears it.
+     */
+    if (shadowsChanged) {
+      this.scene.traverse((object) => {
+        const material = (object as THREE.Mesh).material;
+        if (!material) return;
+        if (Array.isArray(material)) material.forEach((m) => (m.needsUpdate = true));
+        else material.needsUpdate = true;
+      });
+    }
     this.buildComposer();
     this.resize();
   }
@@ -200,11 +223,24 @@ export class Stage {
     }
   }
 
-  /** Momentarily crank the bloom, for the lights slamming on. */
-  setBloomBoost(amount: number): void {
+  /**
+   * Crank the bloom, for the lights slamming on.
+   *
+   * The target is eased towards in `render`, so the show's "boost, then settle"
+   * pair of cues actually settles instead of hard-cutting on the frame the second
+   * cue happens to land on. Pass `immediate` to snap, for a cut that is meant to
+   * be a cut.
+   */
+  setBloomBoost(amount: number, immediate = false): void {
+    this.bloomBoostTarget = amount;
+    if (immediate) this.bloomBoost = amount;
+    this.applyBloomBoost();
+  }
+
+  private applyBloomBoost(): void {
     if (!this.bloomPass) return;
     this.bloomPass.strength = clamp(
-      (this.quality === 'high' ? 0.52 : 0.36) + amount,
+      (this.quality === 'high' ? 0.52 : 0.36) + this.bloomBoost,
       0.1,
       2.4,
     );
@@ -212,6 +248,13 @@ export class Stage {
 
   render(dt: number): void {
     if (!this.camera) return;
+    if (this.bloomBoost !== this.bloomBoostTarget) {
+      this.bloomBoost = damp(this.bloomBoost, this.bloomBoostTarget, 3.4, dt);
+      if (Math.abs(this.bloomBoost - this.bloomBoostTarget) < 0.002) {
+        this.bloomBoost = this.bloomBoostTarget;
+      }
+      this.applyBloomBoost();
+    }
     if (this.composer) this.composer.render(dt);
     else this.renderer.render(this.scene, this.camera);
 

@@ -54,11 +54,36 @@ export interface HitResult {
   destroyed: boolean;
   /** 0-1, for sparks, screen shake and commentary. */
   severity: number;
+  /** Energy the panel shrugged off into the structure behind it, joules. */
+  shock: number;
   part: PartState;
 }
 
 /** Below this, a contact is a scrape and produces no damage event at all. */
 export const MIN_DAMAGING_ENERGY = 45;
+
+/**
+ * How much of a rebuffed strike reaches the structure behind the panel.
+ *
+ * Energy a panel does not absorb does not vanish — it is still delivered, and
+ * something has to take it. A hard, rigid plate spreads that load into the frame
+ * over the whole panel; a soft, ductile one deflects, concentrates the load on
+ * its mountings and hands the shock straight through to whatever is bolted
+ * behind. That is the well-known cost of running plastic: your armour survives
+ * everything and your machine gets shaken to pieces underneath it.
+ *
+ * Without this term the model had no cost at all, and UHMW was strictly the best
+ * armour in the game — better joules per kilogram than titanium *and* the lowest
+ * transfer fraction, so there was no build for which any metal was the right
+ * answer. That is a dead choice in a game whose entire premise is the choice.
+ */
+export const SHOCK_COUPLING = 0.3;
+
+/**
+ * How much of what a panel refuses comes back into the weapon that hit it,
+ * before scaling by that panel's hardness. See `BotDamage.wearWeapon`.
+ */
+export const WEAPON_WEAR = 0.05;
 
 /**
  * Fraction of the incoming energy that couples into the target.
@@ -73,16 +98,34 @@ export function transferFraction(
 ): number {
   const grabbiness = clamp(targetMaterial.friction * 1.45, 0.18, 1);
   const brittleness = 1 - targetMaterial.ductility * 0.62;
+  // A hard face is one a tooth cannot get into. Without this term the model had
+  // no way to tell hardened steel from titanium at all — the two differ mostly in
+  // hardness, not toughness — and every steel in the catalogue was dominated.
+  const bitesIn = 1 - 0.45 * clamp01(targetMaterial.hardness);
   const square = clamp01(squareness);
-  return clamp(0.06 + 0.52 * square * grabbiness * brittleness * clamp(bite, 0.1, 2), 0.03, 0.68);
+  return clamp(
+    0.06 + 0.52 * square * grabbiness * brittleness * bitesIn * clamp(bite, 0.1, 2),
+    0.03,
+    0.68,
+  );
 }
 
-/** Apply one strike to one part. Mutates the part and reports what happened. */
+/**
+ * Apply one strike to one part. Mutates the part and reports what happened.
+ *
+ * Damage is the energy that actually coupled into the part, full stop. `bite` is
+ * already inside `transferFraction` — it is the term that decides how much of the
+ * incoming energy a sharp tooth gets *into* the target instead of skating off it —
+ * and multiplying by it a second time here let a bite-2.0 weapon remove twice as
+ * many armour-joules as the joules it delivered. Part HP is denominated in
+ * absorbed joules, so that is not a balance knob, it is a broken accounting
+ * identity: the panel was losing energy that the strike never carried.
+ */
 export function resolveHit(input: HitInput): HitResult {
   const { energy, bite, squareness, targetMaterial, part } = input;
   const fraction = transferFraction(squareness, targetMaterial, bite);
   const energyTransferred = Math.max(0, energy) * fraction;
-  const damage = energyTransferred * clamp(bite, 0.1, 2);
+  const damage = energyTransferred;
 
   const before = part.hp;
   part.hp = Math.max(0, part.hp - damage);
@@ -95,7 +138,12 @@ export function resolveHit(input: HitInput): HitResult {
   // left is a big hit, regardless of the absolute joules.
   const severity = clamp01(consumed / Math.max(1, part.maxHp * 0.28));
 
-  return { energyTransferred, damage: consumed, destroyed, severity, part };
+  // Ductility squared: compliance is what concentrates the load on the mountings,
+  // and it does so faster than linearly.
+  const rebuffed = Math.max(0, Math.max(0, energy) - energyTransferred);
+  const shock = rebuffed * SHOCK_COUPLING * targetMaterial.ductility ** 2;
+
+  return { energyTransferred, damage: consumed, destroyed, severity, shock, part };
 }
 
 // ---------------------------------------------------------------------------
@@ -235,15 +283,53 @@ export class BotDamage {
   hit(input: Omit<HitInput, 'part'> & { part: PartState }): HitResult {
     const result = resolveHit(input);
     this._totalDamageTaken += result.damage;
+
+    // Shock passes through the panel into the frame. Never enough on its own to
+    // count as destroying the machine — a bent frame is a bound drivetrain, not a
+    // knockout — so it floors at 1 rather than reaching zero.
+    if (result.shock > 0 && result.part.kind === 'armor') {
+      const frame = this.byId.get('frame');
+      if (frame) {
+        const before = frame.hp;
+        frame.hp = Math.max(1, frame.hp - result.shock);
+        frame.absorbed += result.shock;
+        this._totalDamageTaken += before - frame.hp;
+      }
+    }
     return result;
   }
 
-  /** Fraction of drive still turning. Losing wheels on one side hurts more. */
+  /**
+   * Blunt the machine's own weapon on a hard target.
+   *
+   * A spinner that hits hardened plate loses teeth; the same tooth in UHMW just
+   * gouges a channel and comes out fine. This is what a dense, hard armour
+   * package actually buys in the real sport — your plate is heavy and it is going
+   * to get chewed, but their weapon is getting chewed at the same time. Without
+   * it the only thing armour did was survive, and the lightest tough material won
+   * by construction.
+   */
+  wearWeapon(joules: number): void {
+    if (joules <= 0) return;
+    const weapon = this.byId.get('weapon');
+    if (!weapon || weapon.destroyed) return;
+    weapon.hp = Math.max(0, weapon.hp - joules);
+    weapon.absorbed += joules;
+    if (weapon.hp <= 0) weapon.destroyed = true;
+  }
+
+  /**
+   * Fraction of drive still turning. Losing wheels on one side hurts more.
+   *
+   * A folded frame binds the drivetrain: the wheels foul the armour, the gearbox
+   * mounts go out of line, and the machine crawls long before it has lost a
+   * wheel. That is what makes shock through the panels matter, and it is the
+   * reason a plastic-armoured bot loses on a count-out with its armour intact.
+   */
   get mobility(): number {
     const wheels = this.parts.filter((p) => p.kind === 'wheel');
-    if (wheels.length === 0) return 1;
-    const alive = wheels.filter((w) => !w.destroyed).length;
-    return alive / wheels.length;
+    const drive = wheels.length === 0 ? 1 : wheels.filter((w) => !w.destroyed).length / wheels.length;
+    return clamp01(drive * (0.3 + 0.7 * this.frameIntegrity));
   }
 
   get weaponCondition(): number {
@@ -306,9 +392,22 @@ export class BotDamage {
     this.immobileTimer = IMMOBILITY_COUNT_SECONDS;
   }
 
+  /**
+   * Physically wrecked: no drive left and no weapon left.
+   *
+   * Deliberately independent of the referee's count. `isDead` folds the two
+   * together because most callers only want "is this machine finished", but the
+   * knockout announcement has to tell them apart — a machine that stopped moving
+   * and got counted out is a very different television moment from one that was
+   * taken to pieces, and asking `isDead` there could only ever answer "destroyed".
+   */
+  get wrecked(): boolean {
+    return this.mobility <= 0 && this.weaponCondition <= 0;
+  }
+
   /** A bot with no drive and no weapon is done, count or no count. */
   get isDead(): boolean {
-    return this._countedOut || (this.mobility <= 0 && this.weaponCondition <= 0);
+    return this._countedOut || this.wrecked;
   }
 
   snapshot(): BotDamageSnapshot {
@@ -348,6 +447,8 @@ export interface JudgeCard {
   total: [number, number];
   winner: 0 | 1;
   unanimous: boolean;
+  /** Both machines scored identically — the judges cannot separate them. */
+  draw: boolean;
 }
 
 const splitPoints = (a: number, b: number, points: number): [number, number] => {
@@ -372,9 +473,24 @@ export function scoreJudges(a: JudgeTally, b: JudgeTally): JudgeCard {
     damage[1] + aggression[1] + control[1],
   ];
   const winner: 0 | 1 = total[0] >= total[1] ? 0 : 1;
+  /*
+   * A category only counts as won if it was actually won. Scoring `>=` for bot 0
+   * meant a fight in which neither machine landed anything — both tallies zero,
+   * so every category splits exactly down the middle — came back as a *unanimous
+   * decision for bot 0*, which is the one verdict a 0-0 fight definitely is not.
+   */
+  const draw = Math.abs(total[0] - total[1]) < 1e-6;
   const categoriesWonByWinner = [damage, aggression, control].filter((c) =>
-    winner === 0 ? c[0] >= c[1] : c[1] > c[0],
+    winner === 0 ? c[0] > c[1] : c[1] > c[0],
   ).length;
 
-  return { damage, aggression, control, total, winner, unanimous: categoriesWonByWinner === 3 };
+  return {
+    damage,
+    aggression,
+    control,
+    total,
+    winner,
+    unanimous: !draw && categoriesWonByWinner === 3,
+    draw,
+  };
 }

@@ -34,6 +34,8 @@ export class Announcer {
   private voice: SpeechSynthesisVoice | null = null;
   private _enabled = true;
   private captionTimer: number | null = null;
+  /** The line currently on screen, so it can always be taken back off. */
+  private activeLine: string | null = null;
 
   constructor() {
     if (typeof globalThis.speechSynthesis !== 'undefined') {
@@ -77,18 +79,33 @@ export class Announcer {
    */
   say(text: string, options: { emphasis?: boolean; rate?: number; pitch?: number } = {}): void {
     const emphasis = options.emphasis ?? false;
+    if (this.activeLine !== null) this.events.emit('lineEnd', { text: this.activeLine });
+    this.activeLine = text;
     this.events.emit('line', { text, emphasis });
 
     // Captions clear on their own whether or not speech actually runs.
     if (this.captionTimer !== null) clearTimeout(this.captionTimer);
     const readingTime = 900 + text.length * 55;
     this.captionTimer = globalThis.setTimeout(() => {
+      this.activeLine = null;
       this.events.emit('lineEnd', { text });
     }, readingTime) as unknown as number;
 
     if (!this._enabled || !this.synth) return;
 
     try {
+      /*
+       * Cut, do not queue.
+       *
+       * `speechSynthesis.speak` appends to a queue that runs at whatever pace the
+       * platform voice reads at, with no relation to the show's timeline. Over a
+       * 23-second open with eight cued lines that queue drifts seconds behind the
+       * lights and the countdown, and the voice ends up calling the introductions
+       * over the top of the fight. Cancelling first makes every cue land on its
+       * cue: the announcer is always saying the line the show is currently on,
+       * exactly as a live commentator dropping a sentence to call the next beat.
+       */
+      this.synth.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       if (this.voice) utterance.voice = this.voice;
       utterance.rate = options.rate ?? (emphasis ? 0.95 : 1.05);
@@ -106,6 +123,14 @@ export class Announcer {
     if (this.captionTimer !== null) {
       clearTimeout(this.captionTimer);
       this.captionTimer = null;
+    }
+    // The caption timer was the only thing that ever hid a caption, so cancelling
+    // it silently — which is what skipping the show open did — left the last
+    // introduction burned across the screen for the whole fight.
+    if (this.activeLine !== null) {
+      const text = this.activeLine;
+      this.activeLine = null;
+      this.events.emit('lineEnd', { text });
     }
   }
 }

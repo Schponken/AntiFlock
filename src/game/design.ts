@@ -12,6 +12,7 @@ import {
   WEAPONS,
   WEIGHT_LIMIT_KG,
   WHEELS,
+  CLAMP_BITE_STROKE_M,
   accessoryById,
   chassisById,
   materialById,
@@ -202,7 +203,16 @@ export function computeStats(design: BotDesign): DerivedStats {
   const spinPower = (weapon.rotor?.motorWatts ?? 1) * (hasBigBattery ? 1.28 : 1);
   const weaponSpinupTime = weaponEnergy > 0 ? weaponEnergy / (spinPower * 0.82) : 0;
 
-  const actuatorShotEnergy = weapon.actuator?.energy ?? 0;
+  /*
+   * A clamp is rated in newtons and everything else in joules, so the crusher
+   * fell straight through this expression and came out with an actuator energy of
+   * zero — which is the only energy budget combat.ts has for a non-rotor weapon,
+   * so the Hydraulic Crusher did no damage at all, ever. Converting the jaw force
+   * into the work it does over one bite puts it on the same footing as a flipper's
+   * gas charge and a spinner's stored energy.
+   */
+  const clampBiteEnergy = weapon.clamp ? weapon.clamp.force * CLAMP_BITE_STROKE_M : 0;
+  const actuatorShotEnergy = weapon.actuator?.energy ?? clampBiteEnergy;
   const actuatorEnergy = hasBigBattery ? actuatorShotEnergy * 1.1 : actuatorShotEnergy;
 
   // A long horizontal rotor makes the whole machine act like a gyroscope; the
@@ -296,14 +306,21 @@ export function validateDesign(design: BotDesign): ValidationIssue[] {
     });
   }
 
-  if (stats.gyroPenalty > 0.55) {
+  /*
+   * Both of these thresholds were set above anything the catalogue can produce —
+   * the worst gyroscopic penalty available is 0.41 and the slowest spin-up is
+   * 6.6 s — so neither warning had ever fired for any build a player could make.
+   * A validator that cannot trigger is worse than no validator, because it reads
+   * as coverage. These are set from the actual reachable ranges.
+   */
+  if (stats.gyroPenalty > 0.3) {
     issues.push({
       level: 'warning',
       message: 'Gyroscopic forces from that rotor will make the bot lean hard in every turn.',
     });
   }
 
-  if (weapon.rotor && stats.weaponSpinupTime > 14) {
+  if (weapon.rotor && stats.weaponSpinupTime > 5) {
     issues.push({
       level: 'warning',
       message: `Spin-up takes ${stats.weaponSpinupTime.toFixed(0)} s. You will be hit before you are up to speed.`,

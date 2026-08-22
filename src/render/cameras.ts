@@ -128,7 +128,12 @@ export class CameraDirector {
         break;
     }
 
-    this.containWithinArena();
+    // A scripted move is a shot the show asked for by name: the opening crane
+    // starts nine metres outside the box and flies in over the wall, and both
+    // introductions dolly along the outside of the polycarbonate. Clamping those
+    // into the arena froze the crane on a single frame and reduced the intros to
+    // a twitch. Only the free-running modes need protecting from the walls.
+    if (this.mode !== 'scripted') this.containWithinArena();
 
     // Shake is applied after framing so it never fights the smoothing.
     const magnitude = shake * 0.16;
@@ -147,10 +152,12 @@ export class CameraDirector {
   /**
    * Keep the camera inside the box.
    *
-   * Every mode ends up here, because there is no shot worth having from inside a
-   * wall: the near plane slices through the polycarbonate, the corner posts and
-   * the crowd stands, and the picture fills with black geometry. Cheaper and far
-   * more reliable than trying to make each mode individually well behaved.
+   * Every *free-running* mode ends up here, because there is no shot worth having
+   * from inside a wall: the near plane slices through the polycarbonate, the
+   * corner posts and the crowd stands, and the picture fills with black geometry.
+   * Cheaper and far more reliable than trying to make each mode individually well
+   * behaved. Scripted moves are exempt — those positions were authored, not
+   * derived, and several of them are deliberately outside the arena.
    */
   private containWithinArena(): void {
     const limit = ARENA_HALF - 0.55;

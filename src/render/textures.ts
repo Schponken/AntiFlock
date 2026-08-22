@@ -13,6 +13,31 @@ type Ctx = CanvasRenderingContext2D;
 
 const cache = new Map<string, THREE.Texture>();
 
+/*
+ * Liveries get their own bounded cache.
+ *
+ * Every other texture in here is keyed on a value from a fixed catalogue, so the
+ * main cache has a small, known ceiling. A livery is keyed on three RGB values the
+ * player picks with a colour input — and that input fires on every pixel of a
+ * drag, each event rebuilding the preview and minting another 512x512 texture that
+ * nothing ever reclaimed. One thoughtful pass over the colour wheel was hundreds
+ * of megabytes of GPU memory that only came back when the tab closed. An LRU that
+ * disposes what it evicts keeps the recently-tried colours instant, which is the
+ * only reason the cache exists, without the leak.
+ */
+const LIVERY_CACHE_LIMIT = 16;
+const liveryCache = new Map<string, THREE.Texture>();
+
+function cacheLivery(key: string, texture: THREE.Texture): void {
+  liveryCache.set(key, texture);
+  while (liveryCache.size > LIVERY_CACHE_LIMIT) {
+    const oldest = liveryCache.keys().next();
+    if (oldest.done) break;
+    liveryCache.get(oldest.value)?.dispose();
+    liveryCache.delete(oldest.value);
+  }
+}
+
 function makeCanvas(size: number): { canvas: HTMLCanvasElement; ctx: Ctx } {
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -477,8 +502,13 @@ export function makeLiveryTexture(
   seed = 1,
 ): THREE.Texture {
   const key = `livery-${primary}-${secondary}-${accent}-${decal}-${seed}`;
-  const cached = cache.get(key);
-  if (cached) return cached;
+  const cached = liveryCache.get(key);
+  if (cached) {
+    // Re-insert so the most recently used entry is the last to be evicted.
+    liveryCache.delete(key);
+    liveryCache.set(key, cached);
+    return cached;
+  }
 
   const size = 512;
   const { canvas, ctx } = makeCanvas(size);
@@ -604,7 +634,7 @@ export function makeLiveryTexture(
   paintNoise(ctx, size, rng, 0.06, 3);
 
   const texture = toTexture(canvas, { repeat: 1, srgb: true });
-  cache.set(key, texture);
+  cacheLivery(key, texture);
   return texture;
 }
 
@@ -748,4 +778,6 @@ export function makeSmokeSprite(): THREE.Texture {
 export function disposeTextures(): void {
   for (const texture of cache.values()) texture.dispose();
   cache.clear();
+  for (const texture of liveryCache.values()) texture.dispose();
+  liveryCache.clear();
 }

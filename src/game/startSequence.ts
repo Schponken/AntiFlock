@@ -88,6 +88,18 @@ export class StartSequence {
       .add(0.9, 'searchlights', () => {
         lights.setSweeping(true);
         audio.setCrowd(0.55);
+        /*
+         * The music bed runs under the whole open, not just the fight.
+         *
+         * `startMusic` was not called until the ACTIVATE cue at 23.6 s, which left
+         * thirteen seconds between the riser dying and the countdown starting with
+         * nothing under them but a two-second loop of filtered noise. A live show
+         * never has a hole like that in it. Starting the bed low and lifting it
+         * cue by cue gives the introductions something to sit on and makes the
+         * lights-up land as a swell rather than as a sound appearing from nowhere.
+         */
+        audio.setMusicIntensity(0.16);
+        audio.startMusic();
       })
 
       // --- Welcome --------------------------------------------------------
@@ -143,11 +155,13 @@ export class StartSequence {
       .add(15.1, 'ready', () => {
         announcer.say('Drivers — are you ready?', { emphasis: true });
         audio.setCrowd(0.75);
+        audio.setMusicIntensity(0.34);
       })
       .add(17.4, 'robot-fighting-time', () => {
         announcer.say("It's robot fighting time!", { emphasis: true, rate: 0.9 });
         lights.strobe(0.85, 2.2);
         audio.crowdPop(1);
+        audio.setMusicIntensity(0.5);
       })
 
       // --- Lights up ------------------------------------------------------
@@ -157,7 +171,9 @@ export class StartSequence {
         lights.setHouse(0.5);
         audio.lightThunk();
         audio.setCrowd(0.9);
-        stage.setBloomBoost(0.55);
+        // Snap up — the lights genuinely do slam on — then ease back down.
+        stage.setBloomBoost(0.55, true);
+        audio.setMusicIntensity(0.6);
         camera.setMode('broadcast');
       })
       .add(20.1, 'bloom-settle', () => {
@@ -181,6 +197,7 @@ export class StartSequence {
         this.events.emit('card', { text: 'ACTIVATE!', kind: 'go' });
         audio.countdownBeep(true);
         audio.klaxon(1.8);
+        audio.stopRiser();
         audio.startMusic();
         audio.setMusicIntensity(0.75);
         announcer.say('Activate!', { emphasis: true });
@@ -221,9 +238,15 @@ export class StartSequence {
     const { audio, announcer, lights, camera, stage } = this.ctx;
     announcer.cancel();
     lights.setSweeping(false);
+    // Both of these are fire-and-forget effects with their own lifetimes, and
+    // neither was being cleaned up: skipping the open used to drop the player
+    // into a live fight with a seven-second drone still rising over it and the
+    // arena strobing at 12 Hz until the cue happened to time out.
+    lights.stopStrobe();
+    audio.stopRiser();
     lights.setArena(1, true);
     lights.setHouse(0.5, true);
-    stage.setBloomBoost(0);
+    stage.setBloomBoost(0, true);
     camera.setMode('broadcast');
     camera.reset();
     audio.setCrowd(0.85);

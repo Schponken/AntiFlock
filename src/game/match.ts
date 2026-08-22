@@ -147,15 +147,27 @@ export class Match {
 
   // -------------------------------------------------------------------------
 
+  /** Unsubscribers for listeners this match put on objects it does not own. */
+  private subscriptions: (() => void)[] = [];
+
   private wireEvents(): void {
     this.startSequence.events.on('card', (card) => this.events.emit('card', card));
     this.startSequence.events.on('cardClear', () => this.events.emit('cardClear', {}));
     this.startSequence.events.on('fight', () => this.beginFight());
 
-    announcer.events.on('line', ({ text, emphasis }) =>
-      this.events.emit('caption', { text, emphasis }),
+    /*
+     * `announcer` is a module-level singleton that outlives every match, so these
+     * two handlers have to come back off it. Discarding the unsubscribers meant a
+     * disposed match stayed reachable from the announcer's listener list — and
+     * kept emitting captions into its own dead emitter — for the lifetime of the
+     * page, one more retained match (and its world, arena and meshes) per rematch.
+     */
+    this.subscriptions.push(
+      announcer.events.on('line', ({ text, emphasis }) =>
+        this.events.emit('caption', { text, emphasis }),
+      ),
+      announcer.events.on('lineEnd', () => this.events.emit('captionClear', {})),
     );
-    announcer.events.on('lineEnd', () => this.events.emit('captionClear', {}));
 
     this.combat.events.on('impact', (impact) => this.onImpact(impact));
     this.combat.events.on('partDestroyed', ({ bot, part, position }) => {
@@ -449,6 +461,17 @@ export class Match {
       },
     );
 
+    if (card.draw) {
+      // Nothing separated them — usually two machines that never got going. The
+      // `draw` outcome exists for exactly this and was previously unreachable.
+      this.outcome = { kind: 'draw' };
+      this.camera.orbitAround(this.player);
+      this.say("Time! And the judges can't split them — this one is a draw!", true);
+      this.events.emit('outcome', this.outcome);
+      this.finishSoon();
+      return;
+    }
+
     const winner = card.winner === 0 ? this.player : this.opponent;
     const loser = card.winner === 0 ? this.opponent : this.player;
     this.outcome = { kind: 'decision', winner, loser, card };
@@ -474,6 +497,8 @@ export class Match {
   // -------------------------------------------------------------------------
 
   dispose(): void {
+    for (const off of this.subscriptions) off();
+    this.subscriptions.length = 0;
     announcer.cancel();
     audio.stopMusic();
     audio.setCrowd(0);

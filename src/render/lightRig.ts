@@ -172,10 +172,24 @@ export class LightRig {
     this.sweeping = on;
   }
 
-  /** Fire the strobe for `duration` seconds. */
+  /**
+   * Fire the strobe for `duration` seconds.
+   *
+   * Honours `prefers-reduced-motion`. A 12 Hz full-arena flash is squarely inside
+   * the 3-30 Hz band that triggers photosensitive seizures, and the stylesheet's
+   * reduced-motion block cannot reach a `THREE.PointLight` — so the one place the
+   * preference can be respected is here. When it is set the cue still lands, as a
+   * single bright swell rather than a flicker, so the beat is not lost.
+   */
   strobe(strength: number, duration: number): void {
     this.strobeStrength = clamp01(strength);
     this.strobeUntil = this.elapsed + duration;
+  }
+
+  /** Kill the strobe immediately, e.g. when the show open is skipped. */
+  stopStrobe(): void {
+    this.strobeUntil = 0;
+    this.strobeLight.intensity = 0;
   }
 
   /** Kick the team wall washes, e.g. on a knockout. */
@@ -195,6 +209,7 @@ export class LightRig {
     this.setHouse(0, true);
     this.setArena(0, true);
     this.setSweeping(false);
+    this.stopStrobe();
     this.sweepLevel = 0;
     this.washPulse = 0;
   }
@@ -254,9 +269,14 @@ export class LightRig {
     }
 
     if (this.elapsed < this.strobeUntil) {
-      // 12 Hz: fast enough to read as a strobe, slow enough to be comfortable.
-      const on = Math.sin(this.elapsed * Math.PI * 2 * 12) > 0;
-      this.strobeLight.intensity = on ? this.strobeStrength * 320 : 0;
+      if (prefersReducedMotion()) {
+        // One steady swell instead of a flicker: same cue, no flashing.
+        this.strobeLight.intensity = this.strobeStrength * 120;
+      } else {
+        // 12 Hz reads as a strobe on camera and on screen.
+        const on = Math.sin(this.elapsed * Math.PI * 2 * 12) > 0;
+        this.strobeLight.intensity = on ? this.strobeStrength * 320 : 0;
+      }
     } else {
       this.strobeLight.intensity = 0;
     }
@@ -268,7 +288,10 @@ export class LightRig {
   }
 
   dispose(): void {
+    // Shadow-casting lights own a render target each; `Light.dispose()` is what
+    // releases it. Walking only the meshes left every match's shadow maps resident.
     this.group.traverse((object) => {
+      if (object instanceof THREE.Light) object.dispose();
       if (object instanceof THREE.Mesh) {
         object.geometry.dispose();
         const material = object.material;
@@ -276,5 +299,20 @@ export class LightRig {
         else material.dispose();
       }
     });
+  }
+}
+
+/**
+ * Whether the viewer has asked the platform for reduced motion.
+ *
+ * Read live rather than cached: the preference can be changed while the page is
+ * open, and there is no cost to asking. Guarded for headless runs, where there is
+ * no `matchMedia` at all.
+ */
+function prefersReducedMotion(): boolean {
+  try {
+    return globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+  } catch {
+    return false;
   }
 }

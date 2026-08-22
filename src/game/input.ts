@@ -41,9 +41,27 @@ export class InputManager {
   /** Set by any key or button, so the intro can be skipped with "any key". */
   private anyPressed = false;
 
+  /**
+   * True when the keystroke belongs to something the player is typing into.
+   *
+   * This listener sits on `window` and is attached for the whole life of the app,
+   * including while the workshop is open — and the workshop is full of text
+   * inputs, number fields, sliders and colour pickers. Swallowing every bound key
+   * meant a machine could not be named "Wasteland" (W, A, S, D and Space are all
+   * bound), an arrow key nudged the bot instead of the caret, and Space toggled
+   * nothing on a focused checkbox. A control that has focus owns its keystrokes.
+   */
+  private static isTypingTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof globalThis.HTMLElement)) return false;
+    if (target.isContentEditable) return true;
+    const tag = target.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'OPTION';
+  }
+
   private onKeyDown = (event: KeyboardEvent): void => {
     // Never eat the browser's own shortcuts.
     if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (InputManager.isTypingTarget(event.target)) return;
     this.pressed.add(event.code);
     this.anyPressed = true;
     if (this.isBound(event.code)) event.preventDefault();

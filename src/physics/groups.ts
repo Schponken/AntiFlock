@@ -40,10 +40,24 @@ export const HAZARD_GROUPS = groups(
   Layer.BODY_0 | Layer.BODY_1 | Layer.WEAPON_0 | Layer.WEAPON_1 | Layer.DEBRIS | Layer.ARENA,
 );
 
-/** Torn-off parts: bounce around the box and can get in a bot's way. */
+/**
+ * Torn-off parts: bounce around the box and can get in a bot's way.
+ *
+ * The weapon layers belong in this filter. Interaction is an AND of both sides'
+ * masks, and the weapon filter already lists DEBRIS — leaving WEAPON_0/WEAPON_1
+ * out here made that half of the agreement void, so a shed panel passed straight
+ * through a spinning bar as if neither existed. Debris being batted across the box
+ * by a live weapon is one of the most recognisable images in the sport.
+ */
 export const DEBRIS_GROUPS = groups(
   Layer.DEBRIS,
-  Layer.ARENA | Layer.HAZARD | Layer.DEBRIS | Layer.BODY_0 | Layer.BODY_1,
+  Layer.ARENA |
+    Layer.HAZARD |
+    Layer.DEBRIS |
+    Layer.BODY_0 |
+    Layer.BODY_1 |
+    Layer.WEAPON_0 |
+    Layer.WEAPON_1,
 );
 
 const bodyLayer = (team: number): LayerMask => (team === 0 ? Layer.BODY_0 : Layer.BODY_1);

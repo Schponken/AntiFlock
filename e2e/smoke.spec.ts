@@ -67,6 +67,9 @@ test.describe('AntiFlock', () => {
   });
 
   test('the workshop edits a design and updates the live readout', async ({ page }) => {
+    // Same budget as the fight tests: the workshop renders a live 3D preview, and
+    // this machine runs WebGL on the CPU at about a frame a second.
+    test.setTimeout(300_000);
     const errors = collectErrors(page);
     await page.goto('/');
     await expect(page.locator('.screen--title')).toBeVisible({ timeout: 60_000 });
@@ -86,9 +89,26 @@ test.describe('AntiFlock', () => {
     await page.locator('.option', { hasText: 'AR500 Steel' }).click();
     await expect(page.locator('.weight__head strong')).not.toHaveText(weightBefore);
 
-    // Switching to a heavy frame + heavy armour must be caught as illegal.
+    /*
+     * Overweight builds must be caught and must block the fight.
+     *
+     * The old assertion here was `expect(locator).toBeTruthy()`, which passes for
+     * any locator whether or not it matches anything — so the one check that the
+     * weight limit is enforced through the real UI asserted nothing at all. These
+     * three are the actual contract: an error is shown, it names the limit, and
+     * the fight button refuses.
+     */
     await page.locator('.slider__input').first().fill('20');
-    await expect(page.locator('.issue--error, .btn--primary')).toBeTruthy();
+    const error = page.locator('.issue--error').first();
+    await expect(error).toBeVisible();
+    await expect(error).toContainText(/class limit/i);
+    await expect(page.locator('.builder__foot .btn--primary')).toHaveText('ILLEGAL BUILD');
+    await expect(page.locator('.builder__foot .btn--primary')).toBeDisabled();
+
+    // ...and pulling it back under the limit must clear both.
+    await page.locator('.slider__input').first().fill('4');
+    await expect(page.locator('.issue--error')).toHaveCount(0);
+    await expect(page.locator('.builder__foot .btn--primary')).toBeEnabled();
 
     expect(errors, errors.join('\n---\n')).toEqual([]);
   });

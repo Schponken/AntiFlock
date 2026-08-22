@@ -20,7 +20,12 @@ import { fxRng } from '../core/rng.ts';
 import type { PhysicsWorld } from '../physics/world.ts';
 import { Arena, START_SQUARES } from './arena.ts';
 import { Bot, type PartRef } from './bot.ts';
-import { MIN_DAMAGING_ENERGY, type ArmorFace, type PartState } from './damage.ts';
+import {
+  MIN_DAMAGING_ENERGY,
+  WEAPON_WEAR,
+  type ArmorFace,
+  type PartState,
+} from './damage.ts';
 import type { BotDesign } from './design.ts';
 import { Debris } from './debris.ts';
 
@@ -153,6 +158,7 @@ export class Combat {
     for (const bot of this.bots) bot.dispose();
     this.bots.length = 0;
     this.debris.dispose();
+    this.arena.dispose();
     this.colliderIndex.clear();
     this.events.clear();
   }
@@ -224,8 +230,10 @@ export class Combat {
     if (weapon.rotor) {
       available = Math.min(available, attacker.weaponEnergy);
     } else if (weapon.actuator || weapon.clamp) {
-      // A flipper or hammer delivers its charge, not a kinetic-energy budget.
-      available = Math.max(available, attacker.stats.actuatorEnergy * 0.55);
+      // A flipper, hammer or crusher delivers its charge, not a kinetic-energy
+      // budget — but only when it is actually swinging or biting. `Bot` owns that
+      // state, so it owns the number.
+      available = Math.max(available, attacker.actuatorStrikeEnergy * 0.55);
     }
 
     if (available < MIN_DAMAGING_ENERGY) return;
@@ -249,6 +257,11 @@ export class Combat {
     this.hitCooldowns.set(key, HIT_COOLDOWN);
     attacker.damageDealt += result.damage;
     attacker.aggression += result.damage * 0.0002;
+
+    // What the panel refused comes back up the weapon, scaled by how hard that
+    // panel is. Hitting tool steel blunts a rotor; hitting plastic barely marks it.
+    const refused = Math.max(0, available - result.energyTransferred);
+    attacker.damage.wearWeapon(refused * WEAPON_WEAR * defender.stats.parts.armor.hardness);
 
     // Plastic deformation has to come from somewhere: take it out of the rotor.
     if (weapon.rotor) attacker.bleedWeaponEnergy(result.energyTransferred * 0.55);
@@ -294,8 +307,15 @@ export class Combat {
       const energy = 0.5 * impulse * speed;
       if (energy < MIN_DAMAGING_ENERGY * 4) return;
 
-      const point = bot.position(new THREE.Vector3());
-      const face = bot.faceForContact(point.clone().addScaledVector(n, 0.4));
+      /*
+       * Use the manifold's own contact point rather than pushing the bot's centre
+       * along the event normal. Rapier reports that normal in the pair's order,
+       * which is whichever way round the broad phase happened to register the two
+       * colliders — so the offset landed on the correct face roughly half the time
+       * and put the damage straight through the opposite panel the rest of it.
+       */
+      const point = this.contactPoint(handleA, handleB).point;
+      const face = bot.faceForContact(point);
       const part = this.pickTargetPart(bot, face, point);
       const result = bot.damage.hit({
         energy,
@@ -334,8 +354,8 @@ export class Combat {
       // The faster machine is the one doing the ramming.
       const aggressor = refA.bot.speed >= refB.bot.speed ? refA : refB;
       const victim = aggressor === refA ? refB : refA;
-      const point = victim.bot.position(new THREE.Vector3());
-      const face = victim.face ?? victim.bot.faceForContact(point.clone().addScaledVector(n, -0.4));
+      const point = this.contactPoint(handleA, handleB).point;
+      const face = victim.face ?? victim.bot.faceForContact(point);
       const part = this.pickTargetPart(victim.bot, face, point);
       const result = victim.bot.damage.hit({
         energy,
@@ -346,6 +366,11 @@ export class Combat {
       });
       aggressor.bot.aggression += 0.05;
       aggressor.bot.control += 0.05;
+      // The judges score on `damageDealt` and nothing else, so a machine that wins
+      // by driving its opponent into the wall has to be credited for it. Only
+      // weapon strikes were being counted, which handed every ramming build a 0 in
+      // the damage column of a decision it had comfortably earned.
+      aggressor.bot.damageDealt += result.damage;
       if (result.damage > 1) {
         this.events.emit('impact', {
           position: point,
@@ -491,7 +516,7 @@ export class Combat {
         bot.disable();
         this.events.emit('knockout', {
           bot,
-          reason: bot.damage.isDead ? 'destroyed' : 'counted-out',
+          reason: bot.damage.wrecked ? 'destroyed' : 'counted-out',
         });
       }
     }

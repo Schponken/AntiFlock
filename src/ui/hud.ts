@@ -183,6 +183,8 @@ export class Hud {
         `${outcome.winner.design.name.toUpperCase()} WINS ${outcome.card.total[outcome.card.winner].toFixed(0)}–${outcome.card.total[outcome.card.winner === 0 ? 1 : 0].toFixed(0)}`,
         'go',
       );
+    } else {
+      this.showCard('JUDGES’ DECISION', 'DRAW — NOTHING TO SEPARATE THEM', 'go');
     }
   }
 
@@ -232,7 +234,19 @@ export class Hud {
       .filter(Boolean)
       .join('   ·   ');
 
-    if (match.getState() !== 'fighting') {
+    /*
+     * Clear the referee's count the moment the machine gets going again.
+     *
+     * The banner was only ever raised by a `count` event and only ever lowered at
+     * the end of the fight — and a bot that starts moving simply stops emitting
+     * the event, it does not emit anything to say it recovered. So one near-count
+     * left "COUNT 4" burned across the screen for the rest of the match. Deriving
+     * it from live state instead of an event edge cannot get stuck.
+     */
+    const beingCounted = [match.player, match.opponent].some(
+      (bot) => !bot.damage.countedOut && bot.damage.immobileFor > 2.5,
+    );
+    if (!beingCounted || match.getState() !== 'fighting') {
       this.countBanner.classList.remove('is-visible');
     }
   }

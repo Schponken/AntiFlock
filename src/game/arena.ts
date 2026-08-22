@@ -51,6 +51,8 @@ interface Hazard {
   energy: number;
   /** Seconds remaining of the current activation. */
   active: number;
+  /** How long the current activation was asked to last, for easing the rise. */
+  duration: number;
   /** Cooldown before it can be triggered again. */
   cooldown: number;
   /** Local data for the specific hazard's motion. */
@@ -342,6 +344,7 @@ export class Arena {
         mesh,
         energy: 5200,
         active: 0,
+        duration: 0,
         cooldown: 0,
         home,
         axis: new THREE.Vector3(1, 0, 0),
@@ -402,6 +405,7 @@ export class Arena {
         mesh,
         energy: 9000,
         active: 0,
+        duration: 0,
         cooldown: 0,
         home: pivot,
         axis: new THREE.Vector3(1, 0, 0),
@@ -476,6 +480,7 @@ export class Arena {
         mesh,
         energy: 1400,
         active: 0,
+        duration: 0,
         cooldown: 0,
         home,
         axis: new THREE.Vector3(0, 0, 1),
@@ -551,6 +556,7 @@ export class Arena {
     for (const hazard of this.hazards) {
       if (hazard.kind !== 'killsaw' || hazard.cooldown > 0) continue;
       hazard.active = duration;
+      hazard.duration = duration;
       hazard.cooldown = duration + 6;
     }
   }
@@ -562,6 +568,7 @@ export class Arena {
       const isNear = hazard.home.z < 0;
       if ((side < 0) !== isNear) continue;
       hazard.active = 0.85;
+      hazard.duration = 0.85;
       hazard.cooldown = 3.2;
     }
   }
@@ -580,8 +587,22 @@ export class Arena {
 
       switch (hazard.kind) {
         case 'killsaw': {
-          // Rise over a quarter second, hold, then drop back.
-          const raised = hazard.active > 0 ? smoothstep(0, 0.25, hazard.active > 0.3 ? 1 : hazard.active) : 0;
+          /*
+           * Rise over a quarter second, hold, then drop back.
+           *
+           * `active` counts *down*, so feeding it straight into the rise made the
+           * first frame of a five-second activation evaluate smoothstep at 5 and
+           * snap the blade the full 620 mm in one 2 ms step — a 310 m/s teleport
+           * that the solver resolves as an unbounded impulse on anything standing
+           * over the slot. The rise has to be driven by elapsed time and the drop
+           * by remaining time; taking the smaller of the two gives both, and keeps
+           * the blade down when the two ramps overlap on a very short activation.
+           */
+          const elapsed = Math.max(0, hazard.duration - hazard.active);
+          const raised =
+            hazard.active > 0
+              ? Math.min(smoothstep(0, 0.25, elapsed), smoothstep(0, 0.25, hazard.active))
+              : 0;
           const y = hazard.home.y + raised * 0.62;
           hazard.phase += dt * 230;
           hazard.body.setNextKinematicTranslation({ x: hazard.home.x, y, z: hazard.home.z });
@@ -621,6 +642,31 @@ export class Arena {
       position.y < -1.5 ||
       position.y > 6
     );
+  }
+
+  /**
+   * Release everything the arena owns.
+   *
+   * A rematch builds a whole new arena, and without this the old one's floor,
+   * walls, stands, hazards and their materials stayed resident on the GPU for the
+   * lifetime of the page — tens of megabytes per fight, never reclaimed. The
+   * rigid bodies go with the world, which `Match` frees separately.
+   */
+  dispose(): void {
+    this.group.traverse((object) => {
+      if (object instanceof THREE.Mesh || object instanceof THREE.Points) {
+        object.geometry.dispose();
+        const material = object.material;
+        if (Array.isArray(material)) material.forEach((m) => m.dispose());
+        else material.dispose();
+      }
+    });
+    this.group.clear();
+    this.group.removeFromParent();
+    this.crowdMaterials.length = 0;
+    this.hazards.length = 0;
+    this.hazardColliders.clear();
+    this.wallColliders.clear();
   }
 
   /** Nudge the crowd texture so the stands are not perfectly static. */

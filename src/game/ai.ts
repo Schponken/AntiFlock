@@ -278,9 +278,20 @@ export class BotAI {
     if (forward.lengthSq() < 1e-6) return 0;
     forward.normalize();
 
+    /*
+     * Turn a bearing into a steering command, with the sign the controls use.
+     *
+     * `atan2(x, z)` increases as the machine swings towards body +X — and with
+     * forward at +Z and up at +Y, body +X is the machine's *left* (forward is
+     * up x right, so right is -X). `BotInput.steer` is positive to the right, so
+     * the bearing error has to be negated to become a steering command. It was
+     * not, which cancelled out against a matching sign error in the drivetrain
+     * and left the driver looking correct while both halves were wrong; with the
+     * drivetrain fixed, the AI drove away from everything it aimed at.
+     */
     const desired = Math.atan2(direction.x, direction.z);
     const current = Math.atan2(forward.x, forward.z);
-    let error = wrapAngle(desired - current) + this.aimBias;
+    let error = -wrapAngle(desired - current) + this.aimBias;
 
     // Driving inverted means the controls are mirrored, and a real driver
     // takes a moment to remember that.

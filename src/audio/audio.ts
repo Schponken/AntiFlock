@@ -171,6 +171,8 @@ export class AudioEngine {
   private roomGain: GainNode | null = null;
 
   private settings: AudioSettings = { master: 0.8, music: 0.5, sfx: 1 };
+  /** The one sustained riser voice, so it can be cut short. */
+  private riserVoice: { osc: OscillatorNode; gain: GainNode } | null = null;
   private musicTimer: number | null = null;
   private musicStep = 0;
   private nextNoteTime = 0;
@@ -531,6 +533,7 @@ export class AudioEngine {
   riser(duration = 3.5): void {
     const ctx = this.context;
     if (!ctx || !this.sfxBus) return;
+    this.stopRiser();
     const t = ctx.currentTime;
 
     const osc = ctx.createOscillator();
@@ -552,6 +555,29 @@ export class AudioEngine {
     osc.connect(filter).connect(gain).connect(this.sfxBus);
     osc.start(t);
     osc.stop(t + duration + 0.5);
+    // Keep hold of it: a seven-second drone that cannot be stopped keeps rising
+    // over the top of a fight the player skipped into.
+    this.riserVoice = { osc, gain };
+    osc.onended = () => {
+      if (this.riserVoice?.osc === osc) this.riserVoice = null;
+    };
+  }
+
+  /** Cut the riser short — used when the show open is skipped. */
+  stopRiser(): void {
+    const ctx = this.context;
+    const voice = this.riserVoice;
+    if (!ctx || !voice) return;
+    this.riserVoice = null;
+    const t = ctx.currentTime;
+    try {
+      voice.gain.gain.cancelScheduledValues(t);
+      voice.gain.gain.setValueAtTime(Math.max(0.0001, voice.gain.gain.value), t);
+      voice.gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+      voice.osc.stop(t + 0.2);
+    } catch {
+      // Already stopped; nothing to do.
+    }
   }
 
   /** Deep sub hit for lights-out and for knockouts. */
