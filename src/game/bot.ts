@@ -22,7 +22,12 @@ import { buildBotVisual, wedgeDimensions, type BotVisual } from '../render/botMe
 import { BotDamage, type ArmorFace } from './damage.ts';
 import { computeStats, type BotDesign, type DerivedStats } from './design.ts';
 import { DRIVETRAIN_EFFICIENCY } from './design.ts';
-import { driveLayout, rotorInertiaTensor, type WeaponSpec } from './parts.ts';
+import {
+  driveLayout,
+  rotorInertiaTensor,
+  weaponMountFor,
+  type WeaponSpec,
+} from './parts.ts';
 import { clamp, clamp01, damp } from '../core/mathx.ts';
 
 export interface BotInput {
@@ -63,6 +68,9 @@ const SUSPENSION_TRAVEL = 0.03;
  * wheels alike, exactly as a real builder picks springs to suit the corner load.
  */
 const SUSPENSION_SAG = 0.005;
+
+/** How far a hinged wedgelet leans down at the front, radians. */
+const RAMP_TILT = 0.28;
 
 /** How close counts as being in a position to use your weapon, metres. */
 const CONTROL_RANGE = 2.6;
@@ -145,6 +153,8 @@ export class Bot {
   opponent: Bot | null = null;
 
   private tmpVec = new THREE.Vector3();
+  /** Chassis velocity at the top of the step, for post-solve contact handlers. */
+  readonly approachVelocity = new THREE.Vector3();
   private tmpVec2 = new THREE.Vector3();
   private tmpVec3 = new THREE.Vector3();
   private tmpQuat = new THREE.Quaternion();
@@ -299,12 +309,27 @@ export class Bot {
       const rampLength = chassisSpec.length * 0.16;
       for (const side of [-1, 1]) {
         const ramp = RAPIER.ColliderDesc.cuboid(rampWidth / 2, 0.006, rampLength / 2)
+          /*
+           * The lip skims the floor; the slab does not sit on it.
+           *
+           * Placed below the hull underside — which is itself only
+           * `groundClearance` up — and then tilted, the ramp's lower corner ended
+           * up beneath the wheel contact plane, so the machine drove on its
+           * wedgelets instead of its tyres: measured, a Sparkplug with them fitted
+           * carried 30% of its weight on the wheels instead of 100%, with two of
+           * four wheels off the ground. The tilted half-extent is what has to
+           * clear, so compute it rather than guessing an offset.
+           */
           .setTranslation(
             side * (chassisSpec.width / 2 - rampWidth / 2),
-            -chassisSpec.height / 2 - chassisSpec.groundClearance * 0.45,
+            -chassisSpec.height / 2 -
+              chassisSpec.groundClearance +
+              (rampLength / 2) * Math.sin(RAMP_TILT) +
+              0.006 * Math.cos(RAMP_TILT) +
+              0.004,
             chassisSpec.length / 2 - rampLength / 2,
           )
-          .setRotation(quatFromAxisAngle(1, 0, 0, -0.28))
+          .setRotation(quatFromAxisAngle(1, 0, 0, -RAMP_TILT))
           .setMass(0.6)
           .setFriction(0.1)
           .setRestitution(0.12)
@@ -360,7 +385,7 @@ export class Bot {
 
     // --- Weapon ----------------------------------------------------------
     if (weapon.rotor || weapon.actuator || weapon.clamp) {
-      const mount = chassisSpec.weaponMount;
+      const mount = weaponMountFor(chassisSpec, wheel, weapon);
       const world0 = new THREE.Vector3(mount.x, mount.y, mount.z)
         .applyQuaternion(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), facing))
         .add(new THREE.Vector3(position.x, spawnY, position.z));
@@ -538,6 +563,19 @@ export class Bot {
 
   /** Runs inside the fixed step, before the solver. */
   preStep(dt: number): void {
+    /*
+     * The velocity the machine had going *into* this step.
+     *
+     * Contact events are drained after the solver has run, so anything read from
+     * the body inside a contact handler is the velocity the collision has already
+     * taken away. Impact energy is `0.5 * impulse * v`, which only equals the
+     * collision's kinetic energy when `v` is the approach speed — with the
+     * residual instead, the relationship inverts and the harder a machine is
+     * stopped the *less* damage it records.
+     */
+    const v = this.chassis.linvel();
+    this.approachVelocity.set(v.x, v.y, v.z);
+
     this.updateInversion();
     this.updateDrive();
     this.updateWeapon(dt);

@@ -14,7 +14,7 @@
 
 import * as THREE from 'three';
 import type { BotDesign, DerivedStats } from '../game/design.ts';
-import { driveLayout, finishById } from '../game/parts.ts';
+import { driveLayout, finishById, weaponMountFor } from '../game/parts.ts';
 import type { ArmorFace } from '../game/damage.ts';
 import { makeLiveryTexture, makeMetalTexture, makeTyreTexture } from './textures.ts';
 import {
@@ -919,7 +919,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
    * machines cut a slot for it. Both plates run their local X along chassis X, so
    * one opening centred on the machine's centreline serves both.
    */
-  const mount = chassis.weaponMount;
+  const mount = weaponMountFor(chassis, wheel, weapon);
   const rotorHalfWidth = weapon.rotor
     ? (weapon.rotor.shape === 'disc' ? weapon.rotor.thickness : weapon.rotor.span) / 2 + 0.014
     : 0;

@@ -21,6 +21,7 @@ import {
   WHEELS,
   driveLayout,
   weaponById,
+  weaponMountFor,
   type AccessoryEffect,
   type DecalId,
 } from '../game/parts.ts';
@@ -200,10 +201,11 @@ export class Builder {
       this.visual.wheels[i]!.position.set(side * halfTrack, wheelLocalY, z);
     }
     if (this.visual.weaponPivot) {
+      const mount = weaponMountFor(chassis, wheel, stats.parts.weapon);
       this.visual.weaponPivot.position.set(
-        chassis.weaponMount.x,
-        chassis.weaponMount.y,
-        chassis.weaponMount.z,
+        mount.x,
+        mount.y,
+        mount.z,
       );
     }
     this.visual.underglow.intensity = 2.4;

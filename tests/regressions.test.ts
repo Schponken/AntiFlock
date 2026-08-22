@@ -27,9 +27,12 @@ import {
   CHASSIS,
   MATERIALS,
   WEAPONS,
+  WHEELS,
+  driveLayout,
   materialById,
   rotorInertiaTensor,
   weaponById,
+  weaponMountFor,
 } from '../src/game/parts.ts';
 import {
   BotDamage,
@@ -1435,6 +1438,41 @@ describe('shoving and hazards', () => {
     world.free();
   });
 
+  it('records more energy for a harder impact, not less', () => {
+    /*
+     * Contacts are drained after the solver has run, so reading the chassis
+     * velocity inside a contact handler gives what the collision left behind, not
+     * the approach. `0.5 * impulse * v` is the collision's kinetic energy only for
+     * the approach speed — with the residual the relationship inverts, and the
+     * harder a machine is stopped the *less* damage it records. Measured, a 3.3 kJ
+     * head-on ram registered zero while a 37 kJ one registered 3.9 kJ.
+     */
+    const recorded = (speed: number): number => {
+      const { world, combat, red } = fight(
+        presetById('doorstop').design,
+        presetById('anvilhead').design,
+      );
+      run(world, 1);
+      let energy = 0;
+      combat.events.on('impact', (impact) => {
+        if (impact.kind === 'wall') energy += impact.energy;
+      });
+      const chassis = (red as unknown as { chassis: any }).chassis;
+      chassis.setTranslation({ x: 0, y: 0.2, z: -4 }, true);
+      chassis.setLinvel({ x: 0, y: 0, z: -speed }, true);
+      run(world, 2.5);
+      world.free();
+      return energy;
+    };
+
+    const gentle = recorded(4);
+    const hard = recorded(12);
+    expect(hard, 'a 12 m/s wall hit recorded nothing').toBeGreaterThan(0);
+    expect(hard, 'the harder impact recorded less energy than the gentler one').toBeGreaterThan(
+      gentle,
+    );
+  });
+
   it('rate-limits repeated strikes on the same pair', () => {
     // Without the cooldown a sustained contact bills a hit every physics step —
     // 480 a second — instead of one per tooth pass.
@@ -1465,6 +1503,62 @@ describe('shoving and hazards', () => {
       Math.ceil(seconds / HIT_COOLDOWN),
     );
     world.free();
+  });
+});
+
+describe('weapon mounting', () => {
+  it('never hangs a rotor through the floor or through its own wheels', () => {
+    /*
+     * The catalogue's `weaponMount` is the frame designer's intent, and on its own
+     * it did not survive contact with the rotors the builder lets you bolt on. The
+     * stock Vertical Disc on a Lowline Wedge was created 88 mm *below the arena
+     * floor*: the machine parked nose-up on its own weapon carrying 68% of its
+     * weight on the rotor, and the blade ground to a complete stop — 0.0 kJ of a
+     * promised 47.8. A horizontal bar, meanwhile, sweeps a disc wider than the
+     * machine, straight through where the wheels are.
+     */
+    for (const chassis of CHASSIS) {
+      for (const wheel of WHEELS) {
+        for (const weapon of WEAPONS) {
+          if (!weapon.rotor || !chassis.accepts.includes(weapon.kind)) continue;
+          const label = `${chassis.id}/${wheel.id}/${weapon.id}`;
+          const mount = weaponMountFor(chassis, wheel, weapon);
+          const rideHeight = chassis.height / 2 + chassis.groundClearance;
+          const mountY = rideHeight + mount.y;
+
+          if (weapon.rotor.axis === 'x') {
+            expect(mountY - weapon.rotor.radius, `${label}: disc sweeps into the floor`).toBeGreaterThan(
+              0.005,
+            );
+            continue;
+          }
+
+          const half =
+            (weapon.rotor.shape === 'bar' ? weapon.rotor.thickness : weapon.rotor.span) / 2;
+          const tyreTop = rideHeight + driveLayout(chassis, wheel).wheelLocalY + wheel.radius;
+          expect(mountY - half, `${label}: blade sweeps through its own tyres`).toBeGreaterThan(
+            tyreTop,
+          );
+          expect(mountY - half, `${label}: blade sweeps into the floor`).toBeGreaterThan(0.005);
+        }
+      }
+    }
+  });
+
+  it('leaves a stock build with a weapon that actually spins up', () => {
+    // The default weapon on the Lowline Wedge reached 0.0 rad/s and stayed there.
+    for (const chassisId of ['lowwedge', 'sprinter', 'boxframe']) {
+      const design = { ...makeDefaultDesign(), chassisId, weaponId: 'vert-disc' };
+      const stats = computeStats(design);
+      const { world, bot } = solo(design);
+      bot.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+      run(world, 12);
+      expect(
+        Math.abs(bot.omega),
+        `a ${chassisId} could not spin its own weapon up`,
+      ).toBeGreaterThan(stats.weaponMaxOmega * 0.6);
+      world.free();
+    }
   });
 });
 

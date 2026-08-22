@@ -84,16 +84,29 @@ export class Combat {
       this.group.add(this.debris.group);
     }
 
+    /*
+     * The rig is always live; only the *fight* is gated.
+     *
+     * `bot.preStep` is the only caller of `vehicle.updateVehicle`, which is what
+     * raycasts the suspension and holds a machine up on its wheels — so gating it
+     * on `running` meant that for the whole 23-second show open, and again for the
+     * whole post-fight beat, both machines lay flat on their bellies with their
+     * wheels retracted and then hopped when the klaxon went. Neutral input is
+     * already forced on both bots outside the fight, so running the rig costs
+     * nothing and is the difference between two robots waiting on the line and two
+     * crates. The arena's animated hazards were frozen by the same gate: the side
+     * screws turned in the solver while their meshes stood still, and a raised
+     * killsaw never came back down after a knockout.
+     */
     world.events.on('preStep', ({ dt }) => {
-      if (!this.running) return;
       this.arena.update(dt);
       for (const bot of this.bots) bot.preStep(dt);
     });
 
     world.events.on('postStep', ({ dt }) => {
-      if (!this.running) return;
       for (const bot of this.bots) bot.postStep(dt);
       this.debris.update(dt);
+      if (!this.running) return;
       this.tickCooldowns(dt);
       this.checkKnockouts();
     });
@@ -335,7 +348,9 @@ export class Combat {
       const key = `wall:${bot.id}`;
       if (this.hitCooldowns.has(key)) return;
 
-      const speed = bot.speed + Math.abs(bot.chassis.linvel().y);
+      // Approach speed, for the same reason `closingSpeed` uses it.
+      const approach = bot.approachVelocity;
+      const speed = Math.hypot(approach.x, approach.z) + Math.abs(approach.y);
       const energy = 0.5 * impulse * speed;
       if (energy < MIN_DAMAGING_ENERGY * 4) return;
 
@@ -619,9 +634,18 @@ export class Combat {
   }
 
   /** Speed at which two machines are closing along the contact normal. */
+  /**
+   * How fast the two were closing on each other going *into* the step.
+   *
+   * Deliberately not `chassis.linvel()`: contacts are drained after the solver has
+   * run, so the live velocity is what the collision left behind. Measured on the
+   * live reading, a 3.3 kJ head-on ram registered zero damage while a 37 kJ one
+   * registered 3.9 kJ — the harder the hit, the less it counted, because the
+   * harder it hits the more completely it is stopped.
+   */
   private closingSpeed(a: Bot, b: Bot, normal: THREE.Vector3): number {
-    const va = a.chassis.linvel();
-    const vb = b.chassis.linvel();
+    const va = a.approachVelocity;
+    const vb = b.approachVelocity;
     return (
       (vb.x - va.x) * -normal.x + (vb.y - va.y) * -normal.y + (vb.z - va.z) * -normal.z
     );

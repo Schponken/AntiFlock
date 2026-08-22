@@ -214,8 +214,25 @@ export class Stage {
     this.composer.setPixelRatio(this.pixelRatio());
     this.composer.setSize(size.x, size.y);
 
+    /*
+     * Tone map *before* the bloom, not after.
+     *
+     * `UnrealBloomPass`'s threshold is a luminance cut, and 0.86 is an LDR number —
+     * it only means "the brightest part of the picture" once the image is in
+     * display range. Sitting the pass between `RenderPass` and `OutputPass` fed it
+     * the raw linear HDR target, where the arena lights are worth many multiples of
+     * 1.0, so effectively the whole frame passed the cut. Worse, the high-pass
+     * outputs the pixel's *full* value once it passes rather than the excess above
+     * the threshold, so the bloom was adding a second copy of an already
+     * over-bright image and the default tiers washed out to white.
+     *
+     * Running the tone map first puts the threshold back in the range it was
+     * written for and leaves the bloom doing what it is there for: a flare on the
+     * genuinely bright things — the lights, the sparks, a rotor's underglow.
+     */
     this.renderPass = new RenderPass(this.scene, this.camera);
     this.composer.addPass(this.renderPass);
+    this.composer.addPass(new OutputPass());
 
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(size.x, size.y),
@@ -224,7 +241,6 @@ export class Stage {
       0.86,
     );
     this.composer.addPass(this.bloomPass);
-    this.composer.addPass(new OutputPass());
   }
 
   setQuality(quality: QualityLevel): void {

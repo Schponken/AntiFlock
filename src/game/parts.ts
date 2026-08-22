@@ -860,6 +860,50 @@ export function driveLayout(
 }
 
 /**
+ * Where the weapon actually hangs on a given machine.
+ *
+ * The catalogue's `weaponMount` is the frame designer's intent, and on its own it
+ * is not enough: nothing reconciled it with the rotor that ends up bolted there,
+ * and the combinations the builder happily offers include several the intent
+ * cannot survive.
+ *
+ * - A vertical rotor is a disc `radius` tall. On the Lowline Wedge the stock
+ *   Vertical Disc was created 88 mm *below the arena floor*, so the machine parked
+ *   nose-up on its own weapon with 68% of its weight on the rotor and the blade
+ *   ground to a complete stop — 0.0 kJ of a promised 47.8.
+ * - A horizontal rotor sweeps a disc wider than the machine, straight through
+ *   where the wheels are. It has to pass over the tyres or it passes through them.
+ *
+ * Both are the same question — what does the rotor's envelope have to clear — so
+ * both are answered here, once, for the rig, the mesh and the workshop preview.
+ */
+export function weaponMountFor(
+  chassis: ChassisSpec,
+  wheel: WheelSpec,
+  weapon: WeaponSpec,
+): { x: number; y: number; z: number } {
+  const mount = chassis.weaponMount;
+  const rotor = weapon.rotor;
+  if (!rotor) return mount;
+
+  const clearance = 0.012;
+  const rideHeight = chassis.height / 2 + chassis.groundClearance;
+
+  if (rotor.axis === 'x') {
+    // Vertical: the bottom of the swept disc has to stay off the floor.
+    const lowest = -rideHeight + rotor.radius + clearance;
+    return { ...mount, y: Math.max(mount.y, lowest) };
+  }
+
+  // Horizontal: the blade sweeps the machine's own footprint, so it has to clear
+  // the top of the tyres it sweeps across.
+  const { wheelLocalY } = driveLayout(chassis, wheel);
+  const halfThickness = (rotor.shape === 'bar' ? rotor.thickness : rotor.span) / 2;
+  const aboveWheels = wheelLocalY + wheel.radius + halfThickness + clearance;
+  return { ...mount, y: Math.max(mount.y, aboveWheels) };
+}
+
+/**
  * Mass of a spinning weapon element, from its geometry and material.
  * Each shape uses its real swept volume rather than a fudge factor.
  */

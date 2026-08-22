@@ -345,10 +345,19 @@ class App {
          * showing their new build — and lost every change on reload. The title
          * screen was telling them the opposite of what had been stored.
          */
+        /*
+         * Only a legal machine leaves the workshop.
+         *
+         * Storing the edit unconditionally and gating only *persistence* on
+         * legality meant an over-limit build stayed in memory and went straight
+         * into the arena — nothing between here and `addBot` looks at the weight
+         * limit. The heaviest thing the workshop controls can express is 210 kg
+         * against a 113 kg class.
+         */
         const edited = this.builder?.currentDesign;
-        if (edited) {
+        if (edited && isBuildable(edited)) {
           this.playerDesign = edited;
-          if (isBuildable(edited)) saveDesign(edited);
+          saveDesign(edited);
         }
         this.setScreen('title');
       },
@@ -369,6 +378,13 @@ class App {
     this.camera.setMode('orbit');
     this.disposeBuilder();
     this.clearShowroomBot();
+    /*
+     * Re-render in place. `setScreen` clears the root before calling this, but a
+     * difficulty chip calls it directly — so each press stacked another whole
+     * opponent screen underneath the last one, complete with a second set of
+     * chips and a second FIGHT button.
+     */
+    this.screenRoot.replaceChildren();
 
     const grid = el('div', { class: 'opponents' });
     for (const preset of PRESETS) {
@@ -444,6 +460,10 @@ class App {
    * button and nothing else. The startup path already does this properly.
    */
   private beginMatch(): void {
+    // Last line of defence: the design that reaches the box has to be legal.
+    if (!isBuildable(this.playerDesign)) {
+      this.playerDesign = loadDesign() ?? makeDefaultDesign();
+    }
     void this.startMatch().catch((error: unknown) => {
       console.error('AntiFlock could not start the fight', error);
       this.disposeMatch();
