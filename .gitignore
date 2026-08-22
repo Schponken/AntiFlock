@@ -10,4 +10,5 @@ blob-report/
 coverage/
 
 # Throwaway probe suites written while auditing the physics by hand.
-tests/tmpverify_*.test.ts
+tmpverify_*
+**/tmpverify_*
