@@ -1308,7 +1308,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
  * single part. Segments too narrow to be worth bolting on are dropped, which is
  * also the right answer for a six-wheel frame with no room between the rows.
  */
-function panelGeometry(
+export function panelGeometry(
   registry: GeometryRegistry,
   width: number,
   height: number,

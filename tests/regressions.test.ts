@@ -38,6 +38,8 @@ import {
 import { DEBRIS_GROUPS, Layer, filterOf } from '../src/physics/groups.ts';
 import type { Bot } from '../src/game/bot.ts';
 import { StartSequence } from '../src/game/startSequence.ts';
+import { panelGeometry } from '../src/render/botMesh.ts';
+import { GeometryRegistry } from '../src/render/hardware.ts';
 
 beforeAll(async () => {
   await initRapier();
@@ -839,5 +841,48 @@ describe('energy conservation', () => {
     // have paid out more — bearing drag and the freewheel are not free.
     expect(spent).toBeGreaterThanOrEqual(delivered * 0.98);
     world.free();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fabricated hardware
+// ---------------------------------------------------------------------------
+
+describe('bodywork', () => {
+  it('cuts the wheel arches out of the side armour instead of burying the tyres', () => {
+    const registry = new GeometryRegistry();
+    const width = 0.84;
+    const arches: [number, number][] = [
+      [-0.24, 0.09],
+      [0.24, 0.09],
+    ];
+
+    const solid = panelGeometry(registry, width, 0.26, 0.008);
+    const cut = panelGeometry(registry, width, 0.26, 0.008, arches);
+
+    solid.computeBoundingBox();
+    cut.computeBoundingBox();
+    // Both still span the full length of the machine — the arches are holes in
+    // the middle of the plate, not a shortened plate.
+    expect(solid.boundingBox!.max.x).toBeCloseTo(width / 2, 2);
+    expect(cut.boundingBox!.max.x).toBeCloseTo(width / 2, 2);
+
+    // ...and no geometry survives inside either arch.
+    const position = cut.getAttribute('position');
+    for (const [centre, radius] of arches) {
+      let inside = 0;
+      for (let i = 0; i < position.count; i++) {
+        const x = position.getX(i);
+        if (Math.abs(x - centre) < radius * 0.6) inside += 1;
+      }
+      expect(inside, `armour still passes through the wheel at x=${centre}`).toBe(0);
+    }
+
+    // A frame with no room between its wheels keeps a solid plate rather than
+    // ending up with no armour at all.
+    const crowded = panelGeometry(registry, width, 0.26, 0.008, [[0, width]]);
+    crowded.computeBoundingBox();
+    expect(crowded.boundingBox!.max.x).toBeCloseTo(width / 2, 2);
+    registry.dispose();
   });
 });
