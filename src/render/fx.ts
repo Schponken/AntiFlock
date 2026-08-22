@@ -312,5 +312,8 @@ export class Fx {
       (pool.points.material as THREE.Material).dispose();
     }
     for (const mesh of this.scorches) (mesh.material as THREE.Material).dispose();
+    // The scorch marks share one plane geometry, which nobody else frees.
+    this.scorches[0]?.geometry.dispose();
+    this.scorches.length = 0;
   }
 }

@@ -7,7 +7,7 @@
  * and only showed up when something was actually simulated.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { FIXED_DT, PhysicsWorld, initRapier } from '../src/physics/world.ts';
 import { Combat } from '../src/game/combat.ts';
@@ -45,6 +45,17 @@ beforeAll(async () => {
   await initRapier();
 });
 
+/*
+ * Rapier worlds are WASM allocations that nothing reclaims when the JavaScript
+ * handle goes out of scope, and a test that fails an assertion never reaches its
+ * own `world.free()`. Sweeping up afterwards keeps a red run from also being a
+ * leaking one. `PhysicsWorld.free` is idempotent, so the explicit calls stay.
+ */
+const worlds: PhysicsWorld[] = [];
+afterEach(() => {
+  for (const world of worlds.splice(0)) world.free();
+});
+
 const run = (world: PhysicsWorld, seconds: number): void => {
   const steps = Math.round(seconds / FIXED_DT);
   for (let i = 0; i < steps; i++) world.step();
@@ -55,6 +66,7 @@ function solo(design: BotDesign) {
   const combat = new Combat(world, { headless: true });
   const bot = combat.addBot(design, 0);
   combat.start();
+  worlds.push(world);
   return { world, combat, bot };
 }
 
@@ -64,6 +76,7 @@ function fight(a: BotDesign, b: BotDesign) {
   const red = combat.addBot(a, 0);
   const blue = combat.addBot(b, 1);
   combat.start();
+  worlds.push(world);
   return { world, combat, red, blue };
 }
 

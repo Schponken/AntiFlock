@@ -33,11 +33,25 @@ export class GeometryRegistry {
     return material;
   }
 
+  /** Instanced meshes handed out by this registry, which own GPU buffers of their own. */
+  private instanced = new Set<THREE.InstancedMesh>();
+
+  /** Track an instanced mesh so its per-instance buffers are released with the rest. */
+  track(mesh: THREE.InstancedMesh): THREE.InstancedMesh {
+    this.instanced.add(mesh);
+    return mesh;
+  }
+
   dispose(): void {
     for (const geometry of this.geometries) geometry.dispose();
     for (const material of this.materials) material.dispose();
+    // `InstancedMesh` owns an instanceMatrix (and sometimes an instanceColor)
+    // texture that geometry and material disposal does not touch. Bots are rebuilt
+    // on every click in the workshop, and every bolt cluster is one of these.
+    for (const mesh of this.instanced) mesh.dispose();
     this.geometries.clear();
     this.materials.clear();
+    this.instanced.clear();
   }
 }
 
@@ -141,7 +155,7 @@ export function boltCluster(
   // Instances are scattered over the whole machine; let the parent cull it.
   mesh.frustumCulled = false;
   registry.geometry(mesh.geometry);
-  return mesh;
+  return registry.track(mesh);
 }
 
 /** Bolt positions evenly spaced around a circle on a plane. */
@@ -461,6 +475,11 @@ export function mergeGeometries(sources: THREE.BufferGeometry[]): THREE.BufferGe
   const parts = sources.map((geometry) =>
     geometry.index ? geometry.toNonIndexed() : geometry.clone(),
   );
+  // Anything without normals gets its own before it is merged, so the merged
+  // result never has to guess. See the note by the copy loop below.
+  for (const part of parts) {
+    if (!part.getAttribute('normal')) part.computeVertexNormals();
+  }
 
   let vertexCount = 0;
   for (const part of parts) vertexCount += part.getAttribute('position').count;
@@ -484,7 +503,16 @@ export function mergeGeometries(sources: THREE.BufferGeometry[]): THREE.BufferGe
   merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   merged.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  merged.computeVertexNormals();
+  /*
+   * The sources' own normals are kept — deliberately not recomputed.
+   *
+   * These geometries are non-indexed by the time they get here, so
+   * `computeVertexNormals` on the merged result produces flat per-face normals
+   * and throws away every source's smoothing: a bolt's turned shank, a pulley's
+   * rim and a belt's wrap all came out faceted, and a bolt head merged with its
+   * washer shaded as one rounded blob across the joint between two parts that are
+   * physically distinct. Copying the normals across is both cheaper and correct.
+   */
 
   for (const part of parts) part.dispose();
   return merged;

@@ -69,6 +69,7 @@ export class PhysicsWorld {
 
   private queue: RAPIER.EventQueue;
   private accumulator = 0;
+  private freed = false;
   /** Fraction of a fixed step already consumed — used to interpolate the render pose. */
   private _alpha = 0;
   private _stepCount = 0;
@@ -151,7 +152,18 @@ export class PhysicsWorld {
     this._alpha = 0;
   }
 
+  /**
+   * Release the WASM allocations. Safe to call twice.
+   *
+   * Rapier's `free` is not idempotent — calling it on an already-freed world
+   * dereferences a null pointer and throws — and `Match.dispose` is reachable from
+   * more than one path (quitting to the menu, a rematch, the page unloading). A
+   * teardown that crashes on the second attempt is a worse failure than the leak
+   * it was written to prevent.
+   */
   free(): void {
+    if (this.freed) return;
+    this.freed = true;
     this.events.clear();
     this.queue.free();
     this.world.free();

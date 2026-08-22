@@ -92,6 +92,8 @@ export class Match {
   private readonly roundSeconds: number;
   private outcome: MatchOutcome | null = null;
   private endTimer = 0;
+  /** Pending hand-off to the results screen, so it can be cancelled. */
+  private finishTimer: number | null = null;
 
   private voices = new Map<number, BotVoice>();
   private playerInput: BotInput = { ...NEUTRAL_INPUT };
@@ -487,7 +489,13 @@ export class Match {
 
   private finishSoon(): void {
     this.endTimer = 0;
-    globalThis.setTimeout(() => this.setState('finished'), 5200);
+    if (this.finishTimer !== null) clearTimeout(this.finishTimer);
+    // Held so quitting to the menu inside the five seconds does not leave a timer
+    // that wakes up and drives a state change on a match that has been torn down.
+    this.finishTimer = globalThis.setTimeout(() => {
+      this.finishTimer = null;
+      this.setState('finished');
+    }, 5200) as unknown as number;
   }
 
   private say(text: string, emphasis = false): void {
@@ -497,6 +505,10 @@ export class Match {
   // -------------------------------------------------------------------------
 
   dispose(): void {
+    if (this.finishTimer !== null) {
+      clearTimeout(this.finishTimer);
+      this.finishTimer = null;
+    }
     for (const off of this.subscriptions) off();
     this.subscriptions.length = 0;
     announcer.cancel();

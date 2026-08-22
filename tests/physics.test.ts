@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { FIXED_DT, PhysicsWorld, initRapier } from '../src/physics/world.ts';
 import { Combat } from '../src/game/combat.ts';
 import { ARENA_HALF } from '../src/game/arena.ts';
@@ -11,6 +11,20 @@ beforeAll(async () => {
   await initRapier();
 });
 
+/*
+ * Rapier worlds are WASM allocations: nothing reclaims one when the JavaScript
+ * handle goes out of scope. Freeing them by hand meant most tests simply did not,
+ * and the suite carried every world it had ever built for the whole run.
+ */
+const worlds: PhysicsWorld[] = [];
+const track = <T extends { world: PhysicsWorld }>(rig: T): T => {
+  worlds.push(rig.world);
+  return rig;
+};
+afterEach(() => {
+  for (const world of worlds.splice(0)) world.free();
+});
+
 /** Spin up a headless fight, run it for `seconds`, and hand back the pieces. */
 function makeFight(designA = makeDefaultDesign(), designB = presetById('doorstop').design) {
   const world = new PhysicsWorld();
@@ -18,7 +32,7 @@ function makeFight(designA = makeDefaultDesign(), designB = presetById('doorstop
   const a = combat.addBot(designA, 0);
   const b = combat.addBot(designB, 1);
   combat.start();
-  return { world, combat, a, b };
+  return track({ world, combat, a, b });
 }
 
 /** One machine, empty box — for drivetrain tests where an opponent would get in the way. */
@@ -27,7 +41,7 @@ function makeSolo(design = makeDefaultDesign()) {
   const combat = new Combat(world, { headless: true });
   const a = combat.addBot(design, 0);
   combat.start();
-  return { world, combat, a };
+  return track({ world, combat, a });
 }
 
 const run = (world: PhysicsWorld, seconds: number): void => {
