@@ -242,6 +242,37 @@ test.describe('AntiFlock', () => {
     const alongNose = travelled[0]! * before.forward[0]! + travelled[1]! * before.forward[2]!;
     expect(alongNose, 'holding W drove the machine backwards').toBeGreaterThan(distance * 0.4);
 
+    /*
+     * The live readouts.
+     *
+     * `Hud.update()` — the clock, both integrity bars, the weapon charge, the
+     * telemetry line and the INVERTED / DRIVE DAMAGED flags — could be replaced
+     * with `return;` without a single gate noticing: the suite only ever checked
+     * that the HUD was *visible*, which `attach()` does. These are the numbers the
+     * player actually reads.
+     */
+    const telemetryText = await page.locator('.hud__telemetry').innerText();
+    expect(telemetryText, 'the telemetry line is empty').toMatch(/mph/);
+    expect(telemetryText).toMatch(/integrity/);
+    expect(telemetryText, 'a spun-up rotor should report its speed').toMatch(/rpm/);
+
+    // The clock is counting down, not sitting at its initial value.
+    await expect(page.locator('.hud__clock')).not.toHaveText('3:00');
+
+    // Both machines have a health bar with a real width on it.
+    const barWidths = await page.$$eval('.bar__fill', (bars) =>
+      bars.map((bar) => (bar as HTMLElement).style.width),
+    );
+    expect(barWidths.length).toBeGreaterThanOrEqual(2);
+    for (const width of barWidths) expect(width).toMatch(/^\d+(\.\d+)?%$/);
+
+    // The charge readout tracks the weapon that the telemetry just said is spinning.
+    const chargeText = await page.locator('.charge__text').first().innerText();
+    expect(chargeText).toMatch(/kJ/);
+    expect(Number.parseFloat(chargeText), 'the weapon is spinning but reads 0 kJ').toBeGreaterThan(
+      0,
+    );
+
     expect(errors, errors.join('\n---\n')).toEqual([]);
   });
 

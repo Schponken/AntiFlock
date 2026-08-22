@@ -88,7 +88,7 @@ export class Match {
   readonly events = new Emitter<MatchEvents>();
   readonly world: PhysicsWorld;
   readonly combat: Combat;
-  readonly lights = new LightRig();
+  readonly lights: LightRig;
   readonly fx: Fx;
   readonly camera: CameraDirector;
   readonly player: Bot;
@@ -117,6 +117,7 @@ export class Match {
 
   constructor(options: MatchOptions) {
     this.stage = options.stage;
+    this.lights = new LightRig({ headless: options.headless ?? false });
     this.fx = new Fx({ headless: options.headless ?? false });
     this.roundSeconds = options.roundSeconds ?? MATCH_DURATION;
     this.remaining = this.roundSeconds;

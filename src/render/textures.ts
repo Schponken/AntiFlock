@@ -385,6 +385,47 @@ export function makeConcrete(): SurfaceMaps {
 }
 
 /** Diagonal hazard chevrons for the hazard zones and the pit rim. */
+/**
+ * A bank of lamp cells behind a diffuser, for the overhead light housings.
+ *
+ * Used as an emissive map: the banks were flat white slabs, which is the one
+ * light source in the room the player looks straight at.
+ */
+export function makeLampGrid(cells = 4): THREE.Texture {
+  const key = `lampgrid-${cells}`;
+  const cached = cache.get(key);
+  if (cached) return cached;
+
+  const size = 256;
+  const { canvas, ctx } = makeCanvas(size);
+  ctx.fillStyle = '#0b0d10';
+  ctx.fillRect(0, 0, size, size);
+
+  const pitch = size / cells;
+  const inset = pitch * 0.12;
+  for (let y = 0; y < cells; y++) {
+    for (let x = 0; x < cells; x++) {
+      const left = x * pitch + inset;
+      const top = y * pitch + inset;
+      const w = pitch - inset * 2;
+      const gradient = ctx.createLinearGradient(left, top, left, top + w);
+      gradient.addColorStop(0, '#fffaf0');
+      gradient.addColorStop(0.5, '#fff3dc');
+      gradient.addColorStop(1, '#e8d8bd');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(left, top, w, w);
+
+      // The bar of the fitting across the middle of each cell.
+      ctx.fillStyle = '#2a2d33';
+      ctx.fillRect(left, top + w * 0.47, w, w * 0.06);
+    }
+  }
+
+  const texture = toTexture(canvas, { srgb: true });
+  cache.set(key, texture);
+  return texture;
+}
+
 export function makeHazardStripes(a = 0xffc300, b = 0x14161a): THREE.Texture {
   const key = `hazard-${a}-${b}`;
   const cached = cache.get(key);

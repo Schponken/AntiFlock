@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { ARENA_HALF, WALL_HEIGHT } from '../game/arena.ts';
 import { clamp01, damp } from '../core/mathx.ts';
 import { getRenderProfile } from './profile.ts';
+import { makeLampGrid } from './textures.ts';
 
 interface Searchlight {
   light: THREE.SpotLight;
@@ -43,7 +44,10 @@ export class LightRig {
   private washPulse = 0;
   private elapsed = 0;
 
-  constructor() {
+  private headless: boolean;
+
+  constructor(options: { headless?: boolean } = {}) {
+    this.headless = options.headless ?? false;
     this.group.name = 'light-rig';
     const profile = getRenderProfile();
     let shadowCastersLeft = profile.shadows ? profile.shadowCasters : 0;
@@ -53,9 +57,18 @@ export class LightRig {
     this.group.add(this.hemisphere);
 
     // --- Four overhead banks -----------------------------------------------
+    /*
+     * A grid of lamp cells behind a diffuser, rather than a white slab. These are
+     * the one light source the player looks straight at.
+     *
+     * The map is the only thing in this rig that needs a 2D canvas, so it is the
+     * only thing a headless match has to skip — the lights themselves are pure
+     * maths and the fight's behaviour depends on them.
+     */
     const bankMaterial = new THREE.MeshStandardMaterial({
       color: 0x0d0f12,
       emissive: 0xfff4e0,
+      emissiveMap: this.headless ? null : makeLampGrid(),
       emissiveIntensity: 0,
       roughness: 0.4,
       metalness: 0.6,
