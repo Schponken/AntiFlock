@@ -259,12 +259,61 @@ test.describe('AntiFlock', () => {
     // The clock is counting down, not sitting at its initial value.
     await expect(page.locator('.hud__clock')).not.toHaveText('3:00');
 
-    // Both machines have a health bar with a real width on it.
-    const barWidths = await page.$$eval('.bar__fill', (bars) =>
-      bars.map((bar) => (bar as HTMLElement).style.width),
-    );
-    expect(barWidths.length).toBeGreaterThanOrEqual(2);
-    for (const width of barWidths) expect(width).toMatch(/^\d+(\.\d+)?%$/);
+    /*
+     * The health bars have to track the damage model, not merely be shaped like a
+     * percentage. A format check passes just as well on a bar frozen at "100%",
+     * which is exactly what a broken `update()` leaves behind.
+     */
+    const bars = await page.evaluate(() => {
+      const match = (globalThis as Record<string, any>).__antiflock.match;
+      // One plate per machine, and each plate carries three bars — integrity,
+      // drive and weapon — so take the first of each plate rather than the first
+      // two of a flat list.
+      const plates = [...document.querySelectorAll('.plate')];
+      const widths = plates.map((plate) => {
+        const bars = [...plate.querySelectorAll('.bar__fill')] as HTMLElement[];
+        return {
+          integrity: bars[0]?.style.width ?? '',
+          drive: bars[1]?.style.width ?? '',
+          weapon: bars[2]?.style.width ?? '',
+        };
+      });
+      return {
+        widths,
+        integrity: [match.player.damage.integrity, match.opponent.damage.integrity] as [
+          number,
+          number,
+        ],
+        mobility: [match.player.damage.mobility, match.opponent.damage.mobility] as [
+          number,
+          number,
+        ],
+      };
+    });
+    expect(bars.widths.length, 'expected a name plate for each machine').toBe(2);
+    for (let i = 0; i < 2; i++) {
+      const plate = bars.widths[i]!;
+      expect(plate.integrity, `plate ${i} integrity bar is not a percentage`).toMatch(
+        /^\d+(\.\d+)?%$/,
+      );
+      expect(
+        Number.parseFloat(plate.integrity),
+        `plate ${i} integrity bar does not track its machine`,
+      ).toBeCloseTo(bars.integrity[i]! * 100, 0);
+      expect(
+        Number.parseFloat(plate.drive),
+        `plate ${i} drive meter does not track its machine`,
+      ).toBeCloseTo(bars.mobility[i]! * 100, 0);
+      expect(plate.weapon, `plate ${i} weapon meter is not a percentage`).toMatch(
+        /^\d+(\.\d+)?%$/,
+      );
+    }
+    // ...and at least one machine has taken damage by now, so at least one bar is
+    // somewhere other than full — the state a frozen bar can never reach.
+    expect(
+      Math.min(bars.integrity[0], bars.integrity[1]),
+      'neither machine took a scratch, so the bars prove nothing',
+    ).toBeLessThan(0.999);
 
     // The charge readout tracks the weapon that the telemetry just said is spinning.
     const chargeText = await page.locator('.charge__text').first().innerText();

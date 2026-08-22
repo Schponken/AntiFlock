@@ -64,6 +64,9 @@ const SUSPENSION_TRAVEL = 0.03;
  */
 const SUSPENSION_SAG = 0.005;
 
+/** How close counts as being in a position to use your weapon, metres. */
+const CONTROL_RANGE = 2.6;
+
 /** Hard ceiling on how fast the frame itself may tumble, rad/s. */
 const MAX_CHASSIS_OMEGA = 30;
 
@@ -132,8 +135,17 @@ export class Bot {
   aggression = 0;
   control = 0;
   damageDealt = 0;
+  /**
+   * The machine on the other side of the box, set by `Combat` when it joins.
+   *
+   * Judging needs it: aggression and control are both about what you are doing to
+   * *them*, and without a reference they could only ever measure what the driver
+   * was doing on their own.
+   */
+  opponent: Bot | null = null;
 
   private tmpVec = new THREE.Vector3();
+  private tmpVec2 = new THREE.Vector3();
   private tmpVec3 = new THREE.Vector3();
   private tmpQuat = new THREE.Quaternion();
 
@@ -611,9 +623,49 @@ export class Bot {
     const weaponMoving = Math.abs(this._omega) > 3 || this.actuatorTimer > 0;
     this.damage.tickMobility(dt, this.speed, weaponMoving);
 
-    // Aggression: driving forward at the opponent. Control: keeping the wheels down.
-    this.aggression += Math.max(0, this.input.throttle) * this.speed * dt * 0.1;
-    if (!this._inverted) this.control += dt * 0.05;
+    this.tickJudging(dt);
+  }
+
+  /**
+   * The two judged categories that are not damage.
+   *
+   * Both used to be free money. Aggression was `throttle * speed`, with no
+   * opponent anywhere in the expression — so a machine fleeing at full throttle
+   * scored for fleeing, and a machine circling alone at the far end of an empty
+   * box banked 1.33 over a round without ever meeting anybody. Control was
+   * `dt * 0.05` whenever the machine was upright, which is a constant: two
+   * machines that both stayed on their wheels for three minutes came out at
+   * exactly 3.000 each, a guaranteed dead heat in a category worth three points.
+   *
+   * Aggression is now how much of the machine's velocity is pointed at the
+   * opponent, and control is how much of the fight it spent in a position to use
+   * its weapon — close, facing them, and the right way up. Both are things a
+   * driver can actually win, and both are zero for a machine hiding in a corner.
+   */
+  private tickJudging(dt: number): void {
+    const opponent = this.opponent;
+    if (!opponent) return;
+
+    const toOpponent = opponent.position(this.tmpVec).sub(this.position(this.tmpVec2));
+    toOpponent.y = 0;
+    const range = toOpponent.length();
+    if (range < 1e-3) return;
+    toOpponent.divideScalar(range);
+
+    // Aggression: closing speed, and only while the driver is asking to close.
+    const v = this.chassis.linvel();
+    const closing = v.x * toOpponent.x + v.z * toOpponent.z;
+    if (this.input.throttle > 0.05 && closing > 0) {
+      this.aggression += closing * dt * 0.1;
+    }
+
+    // Control: upright, inside weapon range, and pointed at them.
+    if (this._inverted) return;
+    const facing = this.forward(this.tmpVec3);
+    const alignment = facing.x * toOpponent.x + facing.z * toOpponent.z;
+    if (range < CONTROL_RANGE && alignment > 0.4) {
+      this.control += dt * 0.05 * alignment;
+    }
   }
 
   private updateInversion(): void {

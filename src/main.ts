@@ -17,9 +17,11 @@ import {
   PRESETS,
   cloneDesign,
   computeStats,
+  isBuildable,
   loadDesign,
   makeDefaultDesign,
   presetById,
+  saveDesign,
   type BotDesign,
 } from './game/design.ts';
 import type { Difficulty } from './game/ai.ts';
@@ -335,7 +337,19 @@ class App {
         this.setScreen('opponent');
       },
       onBack: () => {
-        this.playerDesign = this.builder?.currentDesign ?? this.playerDesign;
+        /*
+         * Persist on the way out, not only on the way to a fight.
+         *
+         * `saveDesign` was reachable from SAVE & FIGHT alone, so a player who
+         * edited a machine and pressed Back saw the title screen quite correctly
+         * showing their new build — and lost every change on reload. The title
+         * screen was telling them the opposite of what had been stored.
+         */
+        const edited = this.builder?.currentDesign;
+        if (edited) {
+          this.playerDesign = edited;
+          if (isBuildable(edited)) saveDesign(edited);
+        }
         this.setScreen('title');
       },
     });
@@ -407,7 +421,7 @@ class App {
             'div',
             { class: 'opponent__actions' },
             button('← Back', () => this.setScreen('title'), { variant: 'ghost' }),
-            button('FIGHT', () => void this.startMatch(), { variant: 'primary' }),
+            button('FIGHT', () => this.beginMatch(), { variant: 'primary' }),
           ),
         ),
       ),
@@ -421,7 +435,34 @@ class App {
     });
   }
 
+  /**
+   * Start a fight, and put something readable on screen if it cannot start.
+   *
+   * `void this.startMatch()` swallowed every rejection — and the first thing it
+   * awaits is `audio.unlock()`, a promise the platform is entitled to reject. A
+   * player whose browser refused to resume an audio context got a dead FIGHT
+   * button and nothing else. The startup path already does this properly.
+   */
+  private beginMatch(): void {
+    void this.startMatch().catch((error: unknown) => {
+      console.error('AntiFlock could not start the fight', error);
+      this.disposeMatch();
+      this.screenRoot.replaceChildren(
+        el(
+          'section',
+          { class: 'screen screen--center' },
+          el('h2', { text: 'Could not start the fight' }),
+          el('p', { class: 'muted', text: String(error) }),
+          button('← Back', () => this.setScreen('title'), { variant: 'ghost' }),
+        ),
+      );
+    });
+  }
+
   private async startMatch(): Promise<void> {
+    // A key still held on the results screen must not eat the first FIRE of the
+    // next fight; the edge detectors only advance while a fight is being sampled.
+    this.input.resetEdges();
     await audio.unlock();
     this.disposeBuilder();
     this.clearShowroomBot();
@@ -544,7 +585,7 @@ class App {
         el(
           'div',
           { class: 'results__actions' },
-          button('REMATCH', () => void this.startMatch(), { variant: 'primary' }),
+          button('REMATCH', () => this.beginMatch(), { variant: 'primary' }),
           button('WORKSHOP', () => {
             this.disposeMatch();
             this.setScreen('builder');

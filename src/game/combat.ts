@@ -126,6 +126,12 @@ export class Combat {
       headless: this.headless,
     });
     this.bots.push(bot);
+    // Introduce them, so each can be judged on what it does to the other.
+    for (const other of this.bots) {
+      if (other === bot) continue;
+      other.opponent = bot;
+      bot.opponent = other;
+    }
     for (const [handle, ref] of bot.colliderParts) this.colliderIndex.set(handle, ref);
     if (bot.visual) this.group.add(bot.visual.root);
     return bot;

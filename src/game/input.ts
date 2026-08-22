@@ -52,9 +52,16 @@ export class InputManager {
    * nothing on a focused checkbox. A control that has focus owns its keystrokes.
    */
   private static isTypingTarget(target: EventTarget | null): boolean {
-    if (!(target instanceof globalThis.HTMLElement)) return false;
-    if (target.isContentEditable) return true;
-    const tag = target.tagName;
+    /*
+     * Duck-typed rather than `instanceof globalThis.HTMLElement`, which throws
+     * outright ("Right-hand side of 'instanceof' is not an object") anywhere
+     * `HTMLElement` is not defined — and takes the whole keydown handler with it.
+     * All this needs is a tag name.
+     */
+    const element = target as { tagName?: unknown; isContentEditable?: unknown } | null;
+    if (!element || typeof element.tagName !== 'string') return false;
+    if (element.isContentEditable === true) return true;
+    const tag = element.tagName;
     /*
      * Buttons are in this list too, and deliberately.
      *
@@ -86,6 +93,23 @@ export class InputManager {
   private onKeyUp = (event: KeyboardEvent): void => {
     this.pressed.delete(event.code);
   };
+
+  /**
+   * Forget any latched edges and held keys.
+   *
+   * `fire` and `selfRight` are rising edges computed inside `sample()`, and
+   * `sample()` only runs on the fight screen. A key still held when the results
+   * screen appeared left `prevFire` latched true, and releasing it there did not
+   * clear the latch — so the first FIRE of the next fight was swallowed.
+   */
+  resetEdges(): void {
+    this.pressed.clear();
+    this.prevFire = false;
+    this.prevSelfRight = false;
+    this.prevCamera = false;
+    this.anyPressed = false;
+    this.cameraToggled = false;
+  }
 
   private onBlur = (): void => {
     // Losing focus mid-throttle must not leave the machine driving at a wall.

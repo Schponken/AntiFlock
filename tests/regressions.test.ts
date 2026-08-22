@@ -1460,6 +1460,44 @@ describe('horizontal spinners', () => {
   });
 });
 
+describe('judging', () => {
+  it('does not pay a machine for running away', () => {
+    /*
+     * Aggression used to be `throttle * speed` with no opponent anywhere in the
+     * expression, so fleeing at full throttle scored for fleeing, and control was
+     * a constant `dt * 0.05` for any machine that stayed upright — a guaranteed
+     * dead heat in a category worth three of the eleven points.
+     */
+    const { world, red, blue } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+    red.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+    blue.setInput({ throttle: -1, steer: 0, weapon: false, fire: false, selfRight: false });
+    run(world, 25);
+
+    expect(red.aggression, 'the machine that closed scored nothing').toBeGreaterThan(0.5);
+    expect(blue.aggression, 'the machine that fled was paid for fleeing').toBeLessThan(
+      red.aggression * 0.2,
+    );
+    world.free();
+  });
+
+  it('pays nobody for sitting in a corner on their own', () => {
+    const { world, red, blue } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+    // Neither machine does anything at all.
+    run(world, 20);
+    expect(red.aggression).toBe(0);
+    expect(red.control, 'control accrued without ever meeting the opponent').toBe(0);
+    expect(blue.aggression).toBe(0);
+    expect(blue.control).toBe(0);
+    world.free();
+  });
+});
+
 describe('opponent AI behaviour', () => {
   it('deploys the srimech when it is upside-down', () => {
     const design = makeDefaultDesign();
