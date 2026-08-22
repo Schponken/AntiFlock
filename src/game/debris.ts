@@ -12,7 +12,7 @@ import { makeMetalTexture } from '../render/textures.ts';
 import { fxRng } from '../core/rng.ts';
 
 /** Hard cap. Beyond this the oldest piece is removed to make room. */
-const MAX_PIECES = 22;
+export const MAX_DEBRIS_PIECES = 22;
 
 /** Pieces that have stopped moving are swept up after this many seconds. */
 const LIFETIME = 45;
@@ -127,7 +127,7 @@ export class Debris {
 
   private push(piece: Piece): void {
     this.pieces.push(piece);
-    while (this.pieces.length > MAX_PIECES) {
+    while (this.pieces.length > MAX_DEBRIS_PIECES) {
       const oldest = this.pieces.shift();
       if (oldest) this.remove(oldest);
     }

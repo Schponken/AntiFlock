@@ -131,6 +131,7 @@ export class Bot {
   damageDealt = 0;
 
   private tmpVec = new THREE.Vector3();
+  private tmpVec2 = new THREE.Vector3();
   private tmpQuat = new THREE.Quaternion();
 
   constructor(options: {
@@ -568,8 +569,18 @@ export class Bot {
     const perWheelForce = (motor.stallTorque * gearRatio * DRIVETRAIN_EFFICIENCY) / wheel.radius;
 
     const mobility = this.damage.mobility;
+    /*
+     * Only the throttle flips when the machine is running upside-down.
+     *
+     * Two things reverse when the frame rolls over: the suspension ray direction
+     * (so Rapier's wheel forward, and with it the sign of the engine force), and
+     * which side of the *world* each wheel is on. The first reverses the yaw a
+     * given wheel produces; the second reverses which wheel you want to slow
+     * down. They cancel, so the steering sign is unchanged — negating it too made
+     * an inverted machine turn left when the driver asked for right.
+     */
     const throttle = clamp(this.input.throttle, -1, 1) * this.invertedDriveSign;
-    const steer = clamp(this.input.steer, -1, 1) * this.invertedDriveSign;
+    const steer = clamp(this.input.steer, -1, 1);
 
     /*
      * Back-EMF, done with the sign the motor actually sees.
@@ -646,21 +657,37 @@ export class Bot {
    * traction-limited impulses, it can never exceed what the floor can supply.
    */
   private applyDifferentialYaw(): void {
-    let torque = 0;
+    /*
+     * Built in world space, deliberately.
+     *
+     * The short form — `sum(-c_x * J)` about the *body* up axis — is right the
+     * way up and exactly backwards upside-down, because both the body up axis and
+     * Rapier's wheel-forward direction reverse and the two do not cancel. Taking
+     * the vertical component of a proper `r x F` in world coordinates is correct
+     * in every attitude and reduces to the short form when the machine is level.
+     */
+    const forward = this.forward(this.tmpVec).normalize();
+    // The wheel's forward flips with the suspension ray direction.
+    if (this._inverted && this.stats.invertible) forward.multiplyScalar(-1);
+
+    const rotation = this.chassis.rotation();
+    this.tmpQuat.set(rotation.x, rotation.y, rotation.z, rotation.w);
+
+    let torqueY = 0;
     for (let i = 0; i < this.wheelDead.length; i++) {
       if (this.wheelDead[i] || !this.vehicle.wheelIsInContact(i)) continue;
       const impulse = this.vehicle.wheelForwardImpulse(i);
       const connection = this.vehicle.wheelChassisConnectionPointCs(i);
       if (impulse === null || !connection) continue;
-      torque -= connection.x * impulse;
+      const arm = this.tmpVec2
+        .set(connection.x, connection.y, connection.z)
+        .applyQuaternion(this.tmpQuat);
+      // (r x F)_y, with F = impulse * forward.
+      torqueY += impulse * (arm.z * forward.x - arm.x * forward.z);
     }
-    if (Math.abs(torque) < 1e-6) return;
+    if (Math.abs(torqueY) < 1e-6) return;
 
-    const up = this.up(this.tmpVec);
-    this.chassis.applyTorqueImpulse(
-      { x: up.x * torque, y: up.y * torque, z: up.z * torque },
-      true,
-    );
+    this.chassis.applyTorqueImpulse({ x: 0, y: torqueY, z: 0 }, true);
   }
 
   private updateWeapon(dt: number): void {

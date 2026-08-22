@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { FIXED_DT, PhysicsWorld, initRapier } from '../src/physics/world.ts';
 import { Combat, type ImpactEvent } from '../src/game/combat.ts';
+import { MAX_DEBRIS_PIECES } from '../src/game/debris.ts';
 import { makeDefaultDesign, presetById, computeStats, cloneDesign } from '../src/game/design.ts';
 import { materialById } from '../src/game/parts.ts';
 import {
@@ -334,9 +335,18 @@ describe('debris', () => {
         mass: 1,
       });
     }
-    expect(combat.debris.count).toBeLessThanOrEqual(22);
+    /*
+     * The cap has to actually bind. Asserting only `count <= 22` passes just as
+     * happily when the pool is empty and nothing was ever spawned, which is what
+     * this test used to do — and `Number.isFinite(count)` after a second of
+     * simulation is true of every number the field could possibly hold.
+     */
+    expect(combat.debris.count).toBe(MAX_DEBRIS_PIECES);
     run(world, 1);
-    expect(Number.isFinite(combat.debris.count)).toBe(true);
+    expect(combat.debris.count).toBeLessThanOrEqual(MAX_DEBRIS_PIECES);
+
+    // ...and the pieces have to be real bodies in the world, not just a counter.
+    expect(world.world.bodies.len()).toBeGreaterThanOrEqual(MAX_DEBRIS_PIECES);
     world.free();
   });
 });

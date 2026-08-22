@@ -263,8 +263,20 @@ export class Combat {
     const refused = Math.max(0, available - result.energyTransferred);
     attacker.damage.wearWeapon(refused * WEAPON_WEAR * defender.stats.parts.armor.hardness);
 
-    // Plastic deformation has to come from somewhere: take it out of the rotor.
-    if (weapon.rotor) attacker.bleedWeaponEnergy(result.energyTransferred * 0.55);
+    /*
+     * Plastic deformation has to come from somewhere: take it out of the rotor.
+     *
+     * All of it, not 55% of it. The whole premise of this model is one shared
+     * currency — the joules that come off the rotor are the joules that go into
+     * the other machine's structure — and taking only a fraction back meant a
+     * spinner destroyed nearly twice as much armour as it paid for. (The energy
+     * that goes into throwing the two machines apart is a separate account:
+     * Rapier's contact resolution takes that out of the bodies' own kinetic
+     * energy, so charging the rotor exactly what the panel absorbed is not
+     * double-counting.) A big hit now genuinely costs a spinner its wind-up, which
+     * is the single most recognisable rhythm in the sport.
+     */
+    if (weapon.rotor) attacker.bleedWeaponEnergy(result.energyTransferred);
 
     this.events.emit('impact', {
       position: point.clone(),

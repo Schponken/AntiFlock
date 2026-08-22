@@ -187,6 +187,11 @@ test.describe('AntiFlock', () => {
     // seconds depends entirely on the renderer — this machine runs WebGL on the
     // CPU — so assert that time advanced, not how fast the host happened to be.
     expect(telemetry!.stepCount).toBeGreaterThan(stepsBefore);
+    // The opponent has to be driving too, not parked in its square. This was
+    // already being measured and then thrown away.
+    expect(telemetry!.opponentMoved, 'the opponent never left its start square').toBeGreaterThan(
+      0.5,
+    );
 
     expect(errors, errors.join('\n---\n')).toEqual([]);
   });

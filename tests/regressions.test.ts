@@ -176,9 +176,51 @@ describe('inversion', () => {
    * would quietly turn these into tests of nothing.
    */
   function flip(bot: Bot, world: PhysicsWorld, height: number): void {
-    const chassis = (bot as unknown as { chassis: any }).chassis;
-    chassis.setRotation({ x: 1, y: 0, z: 0, w: 0 }, true);
-    chassis.setTranslation({ x: 0, y: height / 2 + 0.02, z: 0 }, true);
+    const rig = bot as unknown as { chassis: any; weaponBody: any | null };
+    const chassis = rig.chassis;
+
+    const from = chassis.translation();
+    const fromRotation = chassis.rotation();
+    const to = { x: from.x, y: height / 2 + 0.02, z: from.z };
+    // 180 degrees about the machine's long axis.
+    const toRotation = { x: 1, y: 0, z: 0, w: 0 };
+
+    /*
+     * The weapon is a separate rigid body on a joint. Moving the chassis without
+     * moving it leaves the joint stretched by however far the chassis jumped, and
+     * the solver answers that by hurling the machine across the arena — which is
+     * a great way to write a test that quietly stops testing what it says it
+     * does. Carry the weapon through the same rigid transform.
+     */
+    const q0 = new THREE.Quaternion(
+      fromRotation.x,
+      fromRotation.y,
+      fromRotation.z,
+      fromRotation.w,
+    );
+    const q1 = new THREE.Quaternion(toRotation.x, toRotation.y, toRotation.z, toRotation.w);
+    const delta = q1.clone().multiply(q0.clone().invert());
+
+    if (rig.weaponBody) {
+      const wt = rig.weaponBody.translation();
+      const wr = rig.weaponBody.rotation();
+      const offset = new THREE.Vector3(wt.x - from.x, wt.y - from.y, wt.z - from.z).applyQuaternion(
+        delta,
+      );
+      rig.weaponBody.setTranslation(
+        { x: to.x + offset.x, y: to.y + offset.y, z: to.z + offset.z },
+        true,
+      );
+      rig.weaponBody.setRotation(
+        delta.clone().multiply(new THREE.Quaternion(wr.x, wr.y, wr.z, wr.w)),
+        true,
+      );
+      rig.weaponBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      rig.weaponBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    }
+
+    chassis.setRotation(toRotation, true);
+    chassis.setTranslation(to, true);
     chassis.setLinvel({ x: 0, y: 0, z: 0 }, true);
     chassis.setAngvel({ x: 0, y: 0, z: 0 }, true);
     run(world, 1.2);
@@ -205,6 +247,30 @@ describe('inversion', () => {
       true,
     );
     world.free();
+  });
+
+  it('steers the same way round when it is upside-down', () => {
+    // Two things reverse when a frame rolls over and they cancel for steering.
+    // Getting that wrong is invisible until someone actually drives inverted.
+    for (const steer of [1, -1]) {
+      const design = presetById('anvilhead').design;
+      const stats = computeStats(design);
+      const { world, bot } = solo(design);
+      run(world, 1);
+      flip(bot, world, stats.parts.chassis.height);
+      expect(bot.inverted).toBe(true);
+
+      const before = bot.forward().clone();
+      drive(bot, 0, steer);
+      run(world, 1.5);
+      const after = bot.forward().clone();
+      const yaw = before.z * after.x - before.x * after.z;
+
+      // Same sign convention as the right-way-up test: right is negative.
+      if (steer > 0) expect(yaw, 'inverted right turn went left').toBeLessThan(0);
+      else expect(yaw, 'inverted left turn went right').toBeGreaterThan(0);
+      world.free();
+    }
   });
 
   it('lets a machine with a srimech right itself, invertible frame or not', () => {
@@ -739,5 +805,39 @@ describe('show open', () => {
     expect(show.fights).toBe(1);
     show.sequence.skip();
     expect(show.fights).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The shared energy currency
+// ---------------------------------------------------------------------------
+
+describe('energy conservation', () => {
+  it('takes off the rotor exactly what it puts into the target', () => {
+    const { world, combat, red, blue } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+
+    let delivered = 0;
+    combat.events.on('impact', (impact) => {
+      if (impact.kind === 'weapon' && impact.attacker === red) delivered += impact.energy;
+    });
+
+    // Spin up, then drive into the opponent for a while.
+    red.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+    run(world, 6);
+
+    const before = red.weaponEnergy;
+    red.setInput({ throttle: 1, steer: 0, weapon: false, fire: false, selfRight: false });
+    blue.setInput({ throttle: -1, steer: 0, weapon: false, fire: false, selfRight: false });
+    run(world, 6);
+    const spent = before - red.weaponEnergy;
+
+    expect(delivered, 'the weapon never landed a hit').toBeGreaterThan(0);
+    // The rotor cannot have paid out less than it delivered. It can legitimately
+    // have paid out more — bearing drag and the freewheel are not free.
+    expect(spent).toBeGreaterThanOrEqual(delivered * 0.98);
+    world.free();
   });
 });
