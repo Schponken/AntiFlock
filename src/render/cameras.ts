@@ -185,14 +185,17 @@ export class CameraDirector {
   }
 
   private updateOrbit(dt: number): void {
+    // Close enough that the workshop actually shows the hardware: the bolts, the
+    // belt, the bearing blocks. A machine is under a metre long, so an orbit
+    // three metres out renders it as a distant brick.
     this.orbitAngle += dt * 0.25;
-    const radius = 3.4;
+    const radius = 1.85;
     this.camera.position.set(
       Math.sin(this.orbitAngle) * radius,
-      1.5,
+      0.86,
       Math.cos(this.orbitAngle) * radius,
     );
-    this.smoothedTarget.set(0, 0.35, 0);
+    this.smoothedTarget.set(0, 0.26, 0);
   }
 
   private updateChase(dt: number, subject: CameraSubject | null): void {

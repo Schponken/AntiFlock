@@ -215,7 +215,16 @@ export class Builder {
   update(dt: number): void {
     this.spin += dt * 0.5;
     this.previewGroup.rotation.y = this.spin;
-    if (this.visual?.weapon) this.visual.weapon.rotation.x += dt * 2.2;
+
+    // Spin the rotor about its own axis. Turning a horizontal bar about X makes
+    // it tumble end-over-end rather than sweep flat, which reads as a broken
+    // machine rather than as a weapon.
+    const rotor = this.visual?.weapon;
+    if (rotor) {
+      const axis = computeStats(this.design).parts.weapon.rotor?.axis ?? 'x';
+      if (axis === 'y') rotor.rotation.y += dt * 2.2;
+      else rotor.rotation.x += dt * 2.2;
+    }
   }
 
   // -------------------------------------------------------------------------

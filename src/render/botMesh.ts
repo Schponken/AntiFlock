@@ -1,19 +1,38 @@
 /**
- * Builds a bot's visible machine from its design: frame, armour panels, wheels,
- * weapon and lights. The returned handles let the simulation dent panels, tear
- * them off, stop wheels and spin the rotor without knowing anything about Three.js.
+ * Builds a bot's visible machine from its design.
+ *
+ * The goal here is that a machine reads as *fabricated*: a welded frame with
+ * armour bolted to it, motor cans down in the belly, a belt running from the
+ * weapon motor to the rotor hub, bearing blocks carrying the shaft, and
+ * fasteners everywhere. All of it is generated from the same design the physics
+ * rig is built from, so a thicker armour spec really does produce visibly
+ * thicker plate and a bigger disc really does have a bigger hub.
+ *
+ * The returned handles let the simulation dent panels, tear them off, stop
+ * wheels and spin the rotor without knowing anything about Three.js.
  */
 
 import * as THREE from 'three';
-import type { DerivedStats } from '../game/design.ts';
-import type { BotDesign } from '../game/design.ts';
+import type { BotDesign, DerivedStats } from '../game/design.ts';
 import { finishById } from '../game/parts.ts';
 import type { ArmorFace } from '../game/damage.ts';
+import { makeLiveryTexture, makeMetalTexture, makeTyreTexture } from './textures.ts';
 import {
-  makeLiveryTexture,
-  makeMetalTexture,
-  makeTyreTexture,
-} from './textures.ts';
+  GeometryRegistry,
+  beltBand,
+  boltCluster,
+  chamferedPlate,
+  flushBoltGeometry,
+  hexBoltGeometry,
+  motorCan,
+  pillowBlock,
+  pulley,
+  ringPlacements,
+  rowPlacements,
+  sprocketGeometry,
+  applyPlanarUV,
+  type BoltPlacement,
+} from './hardware.ts';
 
 export interface BotVisual {
   root: THREE.Group;
@@ -29,42 +48,15 @@ export interface BotVisual {
   dispose(): void;
 }
 
-const disposables: THREE.BufferGeometry[] = [];
-const track = <T extends THREE.BufferGeometry>(geometry: T): T => {
-  disposables.push(geometry);
-  return geometry;
-};
+// ---------------------------------------------------------------------------
+// Materials
+// ---------------------------------------------------------------------------
 
-/** A box with its edges knocked off, which is what welded plate actually looks like. */
-function bevelledBox(w: number, h: number, d: number, bevel = 0.012): THREE.BufferGeometry {
-  const shape = new THREE.Shape();
-  const hw = w / 2;
-  const hh = h / 2;
-  const b = Math.min(bevel, hw * 0.4, hh * 0.4);
-  shape.moveTo(-hw + b, -hh);
-  shape.lineTo(hw - b, -hh);
-  shape.quadraticCurveTo(hw, -hh, hw, -hh + b);
-  shape.lineTo(hw, hh - b);
-  shape.quadraticCurveTo(hw, hh, hw - b, hh);
-  shape.lineTo(-hw + b, hh);
-  shape.quadraticCurveTo(-hw, hh, -hw, hh - b);
-  shape.lineTo(-hw, -hh + b);
-  shape.quadraticCurveTo(-hw, -hh, -hw + b, -hh);
-
-  const geometry = new THREE.ExtrudeGeometry(shape, {
-    depth: d,
-    bevelEnabled: true,
-    bevelThickness: b * 0.8,
-    bevelSize: b * 0.8,
-    bevelSegments: 2,
-    curveSegments: 3,
-  });
-  geometry.translate(0, 0, -d / 2);
-  geometry.computeVertexNormals();
-  return track(geometry);
-}
-
-function liveryMaterial(design: BotDesign, seed: number): THREE.MeshPhysicalMaterial {
+function liveryMaterial(
+  registry: GeometryRegistry,
+  design: BotDesign,
+  seed: number,
+): THREE.MeshPhysicalMaterial {
   const finish = finishById(design.paint.finishId);
   const map = makeLiveryTexture(
     design.paint.primary,
@@ -74,140 +66,302 @@ function liveryMaterial(design: BotDesign, seed: number): THREE.MeshPhysicalMate
     seed,
   );
   const metal = makeMetalTexture(0x8b9099, seed);
-  return new THREE.MeshPhysicalMaterial({
-    map,
-    normalMap: metal.normalMap,
-    normalScale: new THREE.Vector2(0.5, 0.5),
-    roughnessMap: metal.roughnessMap,
-    metalness: finish.metalness,
-    roughness: finish.roughness,
-    clearcoat: finish.clearcoat,
-    clearcoatRoughness: 0.22,
-    envMapIntensity: 1.1,
-  });
+  return registry.material(
+    new THREE.MeshPhysicalMaterial({
+      map,
+      normalMap: metal.normalMap,
+      normalScale: new THREE.Vector2(0.5, 0.5),
+      roughnessMap: metal.roughnessMap,
+      metalness: finish.metalness,
+      roughness: finish.roughness,
+      clearcoat: finish.clearcoat,
+      clearcoatRoughness: 0.22,
+      envMapIntensity: 1.1,
+    }),
+  );
 }
 
-function rawMetalMaterial(tint: number, seed: number, roughness = 0.42): THREE.MeshStandardMaterial {
+function rawMetalMaterial(
+  registry: GeometryRegistry,
+  tint: number,
+  seed: number,
+  roughness = 0.42,
+): THREE.MeshStandardMaterial {
   const maps = makeMetalTexture(tint, seed);
-  return new THREE.MeshStandardMaterial({
-    map: maps.map,
-    normalMap: maps.normalMap,
-    roughnessMap: maps.roughnessMap,
-    // Fully metallic surfaces have no diffuse response at all, so in a dark arena
-    // they read as solid black silhouettes. Backing off the metalness and lifting
-    // the environment contribution keeps steel looking like steel under the lights.
-    metalness: 0.72,
-    roughness: Math.max(0.3, roughness),
-    envMapIntensity: 1.8,
-  });
+  return registry.material(
+    new THREE.MeshStandardMaterial({
+      map: maps.map,
+      normalMap: maps.normalMap,
+      roughnessMap: maps.roughnessMap,
+      // Fully metallic surfaces have no diffuse response at all, so in a dark
+      // arena they read as solid black silhouettes. Backing off the metalness and
+      // lifting the environment contribution keeps steel looking like steel.
+      metalness: 0.72,
+      roughness: Math.max(0.34, roughness),
+      envMapIntensity: 1.25,
+    }),
+  );
 }
 
-/** Impact teeth welded around a rotor. */
+/** Plain machined aluminium, for hubs, brackets and bearing housings. */
+function machinedMaterial(registry: GeometryRegistry, seed: number): THREE.MeshStandardMaterial {
+  const maps = makeMetalTexture(0xa9b0b8, seed);
+  return registry.material(
+    new THREE.MeshStandardMaterial({
+      map: maps.map,
+      normalMap: maps.normalMap,
+      roughnessMap: maps.roughnessMap,
+      metalness: 0.76,
+      roughness: 0.46,
+      envMapIntensity: 1.1,
+    }),
+  );
+}
+
+/** Anodised black hardware: motor cans, belts, fasteners. */
+function hardwareMaterial(registry: GeometryRegistry, seed: number): THREE.MeshStandardMaterial {
+  const maps = makeMetalTexture(0x4a4e55, seed);
+  return registry.material(
+    new THREE.MeshStandardMaterial({
+      map: maps.map,
+      normalMap: maps.normalMap,
+      metalness: 0.6,
+      roughness: 0.58,
+      envMapIntensity: 0.95,
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Weapon rotors
+// ---------------------------------------------------------------------------
+
+/** Impact teeth: chamfered blocks bolted around the rim, not plain cubes. */
 function addTeeth(
+  registry: GeometryRegistry,
   parent: THREE.Object3D,
-  count: number,
-  radius: number,
-  size: number,
-  material: THREE.Material,
-  axis: 'x' | 'y' | 'z',
+  options: {
+    count: number;
+    radius: number;
+    size: number;
+    axis: 'x' | 'y' | 'z';
+    material: THREE.Material;
+    boltMaterial: THREE.Material;
+  },
 ): void {
-  const geometry = track(new THREE.BoxGeometry(size * 1.6, size, size * 1.15));
+  const { count, radius, size, axis, material, boltMaterial } = options;
+
+  // A tooth is a wedge: a broad root at the disc and a narrower hardened tip.
+  const geometry = registry.geometry(
+    new THREE.CylinderGeometry(size * 0.55, size * 1.05, size * 2.1, 4, 1),
+  );
+  const bolts: BoltPlacement[] = [];
+
   for (let i = 0; i < count; i++) {
     const angle = (i / count) * Math.PI * 2;
     const tooth = new THREE.Mesh(geometry, material);
     if (axis === 'x') {
       tooth.position.set(0, Math.cos(angle) * radius, Math.sin(angle) * radius);
       tooth.rotation.x = -angle;
+      tooth.rotation.y = Math.PI / 4;
+      bolts.push({
+        position: new THREE.Vector3(
+          size * 1.1,
+          Math.cos(angle) * radius * 0.92,
+          Math.sin(angle) * radius * 0.92,
+        ),
+        normal: new THREE.Vector3(1, 0, 0),
+      });
     } else {
       tooth.position.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
-      tooth.rotation.y = angle;
+      tooth.rotation.z = angle + Math.PI / 2;
+      tooth.rotation.y = Math.PI / 4;
+      bolts.push({
+        position: new THREE.Vector3(
+          Math.cos(angle) * radius * 0.9,
+          size * 1.1,
+          Math.sin(angle) * radius * 0.9,
+        ),
+        normal: new THREE.Vector3(0, 1, 0),
+      });
     }
     tooth.castShadow = true;
     parent.add(tooth);
   }
+
+  const cluster = boltCluster(
+    registry,
+    hexBoltGeometry(registry, size * 0.3),
+    boltMaterial,
+    bolts,
+  );
+  if (cluster) parent.add(cluster);
 }
 
-function buildRotor(stats: DerivedStats, material: THREE.Material): THREE.Group {
+/** The rotating element, with a real hub, bolt circle and drive pulley. */
+function buildRotor(
+  registry: GeometryRegistry,
+  stats: DerivedStats,
+  material: THREE.Material,
+  hubMaterial: THREE.Material,
+  boltMaterial: THREE.Material,
+): THREE.Group {
   const group = new THREE.Group();
   const rotor = stats.parts.weapon.rotor;
   if (!rotor) return group;
 
   const { shape, radius, thickness, span, teeth, axis } = rotor;
+  const spinAxis = axis === 'y' ? 'y' : 'x';
 
   switch (shape) {
     case 'disc': {
       const disc = new THREE.Mesh(
-        track(new THREE.CylinderGeometry(radius, radius, thickness, 40, 1)),
+        registry.geometry(new THREE.CylinderGeometry(radius, radius, thickness, 44, 1)),
         material,
       );
-      // Cylinders are built around Y; lay it over for an X-axis weapon.
       if (axis === 'x') disc.rotation.z = Math.PI / 2;
       disc.castShadow = true;
       group.add(disc);
 
-      // Lightening pockets. Cut as shallow recesses in the same steel rather than
-      // black holes, which at a distance just read as a hole in the machine.
-      const pocket = track(
-        new THREE.CylinderGeometry(radius * 0.16, radius * 0.16, thickness * 0.55, 12),
+      // Lightening pockets: shallow machined recesses, which is where the mass
+      // the catalogue removed actually went.
+      const pocket = registry.geometry(
+        new THREE.CylinderGeometry(radius * 0.17, radius * 0.17, thickness * 1.02, 14),
       );
-      const pocketMat = new THREE.MeshStandardMaterial({
-        color: 0x6a7079,
-        metalness: 0.6,
-        roughness: 0.75,
-      });
+      const pocketMat = registry.material(
+        new THREE.MeshStandardMaterial({ color: 0x5c626b, metalness: 0.6, roughness: 0.8 }),
+      );
       for (let i = 0; i < 5; i++) {
         const a = (i / 5) * Math.PI * 2;
         const hole = new THREE.Mesh(pocket, pocketMat);
-        hole.position.set(0, Math.cos(a) * radius * 0.52, Math.sin(a) * radius * 0.52);
+        hole.position.set(0, Math.cos(a) * radius * 0.55, Math.sin(a) * radius * 0.55);
         if (axis === 'x') hole.rotation.z = Math.PI / 2;
         group.add(hole);
       }
-      addTeeth(group, teeth, radius * 0.97, thickness * 1.9, material, axis);
+
+      addHub(registry, group, {
+        radius: radius * 0.26,
+        length: thickness * 3.4,
+        axis: spinAxis,
+        material: hubMaterial,
+        boltMaterial,
+        boltRadius: radius * 0.18,
+      });
+      addTeeth(registry, group, {
+        count: teeth,
+        radius: radius * 0.94,
+        size: thickness * 1.5,
+        axis: spinAxis,
+        material,
+        boltMaterial,
+      });
       break;
     }
+
     case 'bar': {
       const depth = radius * 0.24;
-      const bar = new THREE.Mesh(track(new THREE.BoxGeometry(span, thickness, depth)), material);
-      if (axis === 'y') {
-        bar.rotation.set(0, 0, 0);
-        // A horizontal bar lies flat: length on X, thickness on Y.
-      } else {
-        bar.rotation.z = Math.PI / 2;
-      }
+      const bar = new THREE.Mesh(
+        registry.geometry(new THREE.BoxGeometry(span, thickness, depth)),
+        material,
+      );
+      if (axis !== 'y') bar.rotation.z = Math.PI / 2;
       bar.castShadow = true;
       group.add(bar);
 
-      // Hardened tips at each end.
-      const tipGeom = track(new THREE.BoxGeometry(span * 0.09, thickness * 1.5, depth * 1.25));
+      // Bolt-on hardened tips: the part that actually hits, replaced between fights.
+      const tipGeom = registry.geometry(
+        new THREE.CylinderGeometry(depth * 0.42, depth * 0.66, span * 0.1, 4, 1),
+      );
+      const tipBolts: BoltPlacement[] = [];
       for (const sign of [-1, 1]) {
         const tip = new THREE.Mesh(tipGeom, material);
-        tip.position.set(sign * (span / 2 - span * 0.045), 0, 0);
+        if (axis === 'y') {
+          tip.position.set(sign * (span / 2 - span * 0.045), 0, 0);
+          tip.rotation.z = sign > 0 ? -Math.PI / 2 : Math.PI / 2;
+          tip.rotation.y = Math.PI / 4;
+          tipBolts.push({
+            position: new THREE.Vector3(sign * span * 0.4, thickness * 0.6, 0),
+            normal: new THREE.Vector3(0, 1, 0),
+          });
+        } else {
+          tip.position.set(0, sign * (span / 2 - span * 0.045), 0);
+          tip.rotation.y = Math.PI / 4;
+          tipBolts.push({
+            position: new THREE.Vector3(thickness * 0.6, sign * span * 0.4, 0),
+            normal: new THREE.Vector3(1, 0, 0),
+          });
+        }
         tip.castShadow = true;
         group.add(tip);
       }
+      const cluster = boltCluster(
+        registry,
+        hexBoltGeometry(registry, thickness * 0.35),
+        boltMaterial,
+        tipBolts,
+      );
+      if (cluster) group.add(cluster);
+
+      addHub(registry, group, {
+        radius: depth * 0.62,
+        length: thickness * 3.6,
+        axis: spinAxis,
+        material: hubMaterial,
+        boltMaterial,
+        boltRadius: depth * 0.42,
+      });
       break;
     }
+
     case 'drum': {
       const drum = new THREE.Mesh(
-        track(new THREE.CylinderGeometry(radius, radius, span, 28, 1)),
+        registry.geometry(new THREE.CylinderGeometry(radius, radius, span, 32, 1)),
         material,
       );
       drum.rotation.z = Math.PI / 2;
       drum.castShadow = true;
       group.add(drum);
-      const toothGeom = track(new THREE.BoxGeometry(span * 0.94, radius * 0.34, radius * 0.3));
+
+      // End caps, proud of the shell like the real welded discs.
+      const capGeom = registry.geometry(
+        new THREE.CylinderGeometry(radius * 1.03, radius * 1.03, span * 0.05, 32),
+      );
+      for (const sign of [-1, 1]) {
+        const cap = new THREE.Mesh(capGeom, hubMaterial);
+        cap.rotation.z = Math.PI / 2;
+        cap.position.x = (sign * span) / 2;
+        group.add(cap);
+      }
+
+      const toothGeom = registry.geometry(
+        new THREE.CylinderGeometry(radius * 0.16, radius * 0.3, span * 0.92, 4, 1),
+      );
       for (let i = 0; i < teeth; i++) {
         const a = (i / teeth) * Math.PI * 2;
         const tooth = new THREE.Mesh(toothGeom, material);
-        tooth.position.set(0, Math.cos(a) * radius * 0.96, Math.sin(a) * radius * 0.96);
+        tooth.position.set(0, Math.cos(a) * radius * 0.99, Math.sin(a) * radius * 0.99);
         tooth.rotation.x = -a;
+        tooth.rotation.z = Math.PI / 2;
+        tooth.rotation.y = Math.PI / 4;
         tooth.castShadow = true;
         group.add(tooth);
       }
+      addHub(registry, group, {
+        radius: radius * 0.2,
+        length: span * 1.3,
+        axis: 'x',
+        material: hubMaterial,
+        boltMaterial,
+        boltRadius: radius * 0.13,
+      });
       break;
     }
+
     case 'ring': {
-      const ringGeom = track(new THREE.TorusGeometry(radius * 0.92, thickness * 1.2, 8, 26));
+      // A cage rotor: two end rings joined by the bars that do the hitting.
+      const ringGeom = registry.geometry(
+        new THREE.TorusGeometry(radius * 0.92, thickness * 1.2, 8, 30),
+      );
       for (const sign of [-1, 1]) {
         const ring = new THREE.Mesh(ringGeom, material);
         ring.position.x = (sign * span) / 2;
@@ -215,82 +369,239 @@ function buildRotor(stats: DerivedStats, material: THREE.Material): THREE.Group 
         ring.castShadow = true;
         group.add(ring);
       }
-      const barGeom = track(
-        new THREE.BoxGeometry(span, thickness * 2.2, thickness * 1.6),
+      const barGeom = registry.geometry(
+        new THREE.CylinderGeometry(thickness * 1.25, thickness * 1.25, span, 5),
       );
       for (let i = 0; i < teeth; i++) {
         const a = (i / teeth) * Math.PI * 2;
         const bar = new THREE.Mesh(barGeom, material);
         bar.position.set(0, Math.cos(a) * radius * 0.9, Math.sin(a) * radius * 0.9);
-        bar.rotation.x = -a;
+        bar.rotation.z = Math.PI / 2;
         bar.castShadow = true;
         group.add(bar);
       }
+      // Spokes tying the rings back to the shaft.
+      const spokeGeom = registry.geometry(
+        new THREE.BoxGeometry(thickness * 1.4, radius * 0.9, thickness * 2),
+      );
+      for (const sign of [-1, 1]) {
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * Math.PI * 2;
+          const spoke = new THREE.Mesh(spokeGeom, hubMaterial);
+          spoke.position.set(
+            (sign * span) / 2,
+            (Math.cos(a) * radius * 0.9) / 2,
+            (Math.sin(a) * radius * 0.9) / 2,
+          );
+          spoke.rotation.x = -a;
+          group.add(spoke);
+        }
+      }
+      addHub(registry, group, {
+        radius: radius * 0.16,
+        length: span * 1.1,
+        axis: 'x',
+        material: hubMaterial,
+        boltMaterial,
+        boltRadius: radius * 0.1,
+      });
       break;
     }
   }
+
   return group;
 }
 
-/** Flippers, hammers and crushers are all an arm on a pivot; only the shape differs. */
-function buildArm(stats: DerivedStats, material: THREE.Material): THREE.Group {
+/** Central hub and its bolt circle, where the rotor keys onto the shaft. */
+function addHub(
+  registry: GeometryRegistry,
+  parent: THREE.Object3D,
+  options: {
+    radius: number;
+    length: number;
+    axis: 'x' | 'y';
+    material: THREE.Material;
+    boltMaterial: THREE.Material;
+    boltRadius: number;
+  },
+): void {
+  const { radius, length, axis, material, boltMaterial, boltRadius } = options;
+
+  const hub = new THREE.Mesh(
+    registry.geometry(new THREE.CylinderGeometry(radius, radius, length, 18)),
+    material,
+  );
+  if (axis === 'x') hub.rotation.z = Math.PI / 2;
+  hub.castShadow = true;
+  parent.add(hub);
+
+  const placements: BoltPlacement[] = [];
+  for (const facing of [1, -1] as const) {
+    placements.push(
+      ...ringPlacements({
+        count: 6,
+        radius: boltRadius,
+        axis,
+        offset: (facing * length) / 2,
+        facing,
+      }),
+    );
+  }
+  const cluster = boltCluster(
+    registry,
+    flushBoltGeometry(registry, boltRadius * 0.32),
+    boltMaterial,
+    placements,
+  );
+  if (cluster) parent.add(cluster);
+}
+
+// ---------------------------------------------------------------------------
+// Actuated arms
+// ---------------------------------------------------------------------------
+
+/** Flippers, hammers and crushers are all an arm on a pivot; only the tool differs. */
+function buildArm(
+  registry: GeometryRegistry,
+  stats: DerivedStats,
+  material: THREE.Material,
+  hubMaterial: THREE.Material,
+  boltMaterial: THREE.Material,
+): THREE.Group {
   const group = new THREE.Group();
   const weapon = stats.parts.weapon;
   const reach = weapon.actuator?.reach ?? weapon.clamp?.reach ?? 0.4;
   const width = stats.parts.chassis.width * 0.72;
 
+  // Every arm turns on a real pivot tube.
+  const pivot = new THREE.Mesh(
+    registry.geometry(new THREE.CylinderGeometry(0.028, 0.028, width * 0.9, 14)),
+    hubMaterial,
+  );
+  pivot.rotation.z = Math.PI / 2;
+  group.add(pivot);
+
   switch (weapon.kind) {
     case 'flipper': {
-      const plate = new THREE.Mesh(track(new THREE.BoxGeometry(width, 0.016, reach)), material);
+      const plate = new THREE.Mesh(
+        chamferedPlate(registry, { width, height: reach, thickness: 0.016 }),
+        material,
+      );
+      plate.rotation.x = -Math.PI / 2;
       plate.position.z = reach / 2;
       plate.castShadow = true;
       group.add(plate);
-      const ribGeom = track(new THREE.BoxGeometry(0.02, 0.05, reach * 0.85));
+
+      // Stiffening ribs under the plate, and the bolts holding it to them.
+      const ribGeom = registry.geometry(new THREE.BoxGeometry(0.016, 0.05, reach * 0.86));
+      const bolts: BoltPlacement[] = [];
       for (const sign of [-1, 0, 1]) {
-        const rib = new THREE.Mesh(ribGeom, material);
-        rib.position.set(sign * width * 0.34, -0.03, reach * 0.5);
+        const rib = new THREE.Mesh(ribGeom, hubMaterial);
+        rib.position.set(sign * width * 0.34, -0.032, reach * 0.5);
+        rib.castShadow = true;
         group.add(rib);
+        bolts.push(
+          ...rowPlacements({
+            count: 3,
+            from: new THREE.Vector3(sign * width * 0.34, 0.009, reach * 0.16),
+            to: new THREE.Vector3(sign * width * 0.34, 0.009, reach * 0.88),
+            normal: new THREE.Vector3(0, 1, 0),
+          }),
+        );
       }
+      const cluster = boltCluster(
+        registry,
+        flushBoltGeometry(registry, 0.008),
+        boltMaterial,
+        bolts,
+      );
+      if (cluster) group.add(cluster);
       break;
     }
+
     case 'hammer': {
       const shaft = new THREE.Mesh(
-        track(new THREE.BoxGeometry(0.055, 0.055, reach)),
-        material,
+        registry.geometry(new THREE.BoxGeometry(0.05, 0.05, reach)),
+        hubMaterial,
       );
       shaft.position.z = reach / 2;
       shaft.castShadow = true;
       group.add(shaft);
-      const head = new THREE.Mesh(track(new THREE.BoxGeometry(0.13, 0.11, 0.16)), material);
+
+      const head = new THREE.Mesh(
+        registry.geometry(new THREE.BoxGeometry(0.13, 0.1, 0.15)),
+        material,
+      );
       head.position.z = reach;
       head.castShadow = true;
       group.add(head);
-      const beak = new THREE.Mesh(track(new THREE.ConeGeometry(0.045, 0.12, 4)), material);
-      beak.position.set(0, -0.09, reach);
+
+      // The beak that actually punches through top armour.
+      const beak = new THREE.Mesh(
+        registry.geometry(new THREE.ConeGeometry(0.042, 0.13, 4)),
+        material,
+      );
+      beak.position.set(0, -0.1, reach + 0.01);
       beak.rotation.x = Math.PI;
+      beak.rotation.y = Math.PI / 4;
+      beak.castShadow = true;
       group.add(beak);
+
+      const cluster = boltCluster(
+        registry,
+        hexBoltGeometry(registry, 0.009),
+        boltMaterial,
+        ringPlacements({ count: 4, radius: 0.045, axis: 'z', offset: reach - 0.076, facing: -1 }),
+      );
+      if (cluster) group.add(cluster);
       break;
     }
+
     case 'crusher': {
-      const upper = new THREE.Mesh(track(new THREE.BoxGeometry(0.09, 0.07, reach)), material);
+      const upper = new THREE.Mesh(
+        registry.geometry(new THREE.BoxGeometry(0.085, 0.062, reach)),
+        hubMaterial,
+      );
       upper.position.z = reach / 2;
       upper.castShadow = true;
       group.add(upper);
-      const tooth = new THREE.Mesh(track(new THREE.ConeGeometry(0.05, 0.15, 5)), material);
+
+      const tooth = new THREE.Mesh(
+        registry.geometry(new THREE.ConeGeometry(0.046, 0.16, 5)),
+        material,
+      );
       tooth.position.set(0, -0.1, reach * 0.92);
       tooth.rotation.x = Math.PI;
       tooth.castShadow = true;
       group.add(tooth);
+
+      // The ram that drives it, running back along the arm.
+      const ram = new THREE.Mesh(
+        registry.geometry(new THREE.CylinderGeometry(0.028, 0.028, reach * 0.5, 12)),
+        material,
+      );
+      ram.rotation.x = Math.PI / 2;
+      ram.position.set(0, 0.055, reach * 0.3);
+      group.add(ram);
       break;
     }
+
     default: {
-      const wedge = new THREE.Mesh(track(new THREE.BoxGeometry(width, 0.02, reach)), material);
+      const wedge = new THREE.Mesh(
+        chamferedPlate(registry, { width, height: reach, thickness: 0.018 }),
+        material,
+      );
+      wedge.rotation.x = -Math.PI / 2;
       wedge.position.z = reach / 2;
       group.add(wedge);
     }
   }
   return group;
 }
+
+// ---------------------------------------------------------------------------
+// Wedge
+// ---------------------------------------------------------------------------
 
 /** Dimensions of the front wedge, shared by its mesh and its collider. */
 export function wedgeDimensions(chassis: { width: number; height: number }): {
@@ -308,157 +619,463 @@ export function wedgeDimensions(chassis: { width: number; height: number }): {
 /**
  * The static front wedge, used by wedge bots and by anything fitted with forks.
  *
- * Built from explicit vertices rather than an extruded shape. An extrusion has to
- * be rotated and translated into place afterwards, and getting either wrong
- * produces a slab lying across the floor at an angle rather than a ramp bolted to
- * the nose — which is exactly what happened. These six points are unambiguous,
- * and `wedgeCorners` in bot.ts builds the collider from the same description.
+ * Built from explicit vertices rather than an extruded shape. An extrusion has
+ * to be rotated and translated into place afterwards, and getting either wrong
+ * produces a slab lying across the floor at an angle rather than a ramp bolted
+ * to the nose — which is exactly what happened. These six points are
+ * unambiguous, and `wedgeHullPoints` in bot.ts builds the collider from the
+ * same description.
  */
-function buildWedge(stats: DerivedStats, material: THREE.Material): THREE.Mesh {
-  const { hw, rise, depth } = wedgeDimensions(stats.parts.chassis);
+function rampGeometry(
+  registry: GeometryRegistry,
+  options: { xMin: number; xMax: number; rise: number; depth: number },
+): THREE.BufferGeometry {
+  const { xMin, xMax, rise, depth } = options;
 
-  // Tip along +Z at floor level, rising to a back face at the chassis nose.
-  const tipL = [-hw, 0, depth];
-  const tipR = [hw, 0, depth];
-  const backBottomL = [-hw, 0, 0];
-  const backBottomR = [hw, 0, 0];
-  const backTopL = [-hw, rise, 0];
-  const backTopR = [hw, rise, 0];
+  const tipL = [xMin, 0, depth];
+  const tipR = [xMax, 0, depth];
+  const backBottomL = [xMin, 0, 0];
+  const backBottomR = [xMax, 0, 0];
+  const backTopL = [xMin, rise, 0];
+  const backTopR = [xMax, rise, 0];
 
   const tri = (a: number[], b: number[], c: number[]) => [...a, ...b, ...c];
   const positions = new Float32Array([
-    // Ramp face.
     ...tri(tipL, tipR, backTopR),
     ...tri(tipL, backTopR, backTopL),
-    // Underside.
     ...tri(tipL, backBottomL, backBottomR),
     ...tri(tipL, backBottomR, tipR),
-    // Back face against the chassis.
     ...tri(backBottomL, backTopL, backTopR),
     ...tri(backBottomL, backTopR, backBottomR),
-    // Sides.
     ...tri(tipL, backTopL, backBottomL),
     ...tri(tipR, backBottomR, backTopR),
   ]);
 
-  const geometry = track(new THREE.BufferGeometry());
+  const geometry = registry.geometry(new THREE.BufferGeometry());
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.computeVertexNormals();
-
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
+  applyPlanarUV(geometry, 'x', 'z');
+  return geometry;
 }
 
-export function buildBotVisual(
-  design: BotDesign,
+/**
+ * The front wedge.
+ *
+ * A wedge *weapon* is one solid plate running the full width. The forks
+ * accessory is three separate ground-scraping prongs — which is what the real
+ * thing is, and which stops the nose of every bot in the game looking like a
+ * featureless white sheet. Both are subsets of the same convex envelope, so the
+ * single hull collider in bot.ts remains an honest description of either.
+ */
+function buildWedge(
+  registry: GeometryRegistry,
   stats: DerivedStats,
-  team: 0 | 1,
-): BotVisual {
+  material: THREE.Material,
+  boltMaterial: THREE.Material,
+  style: 'solid' | 'forks',
+): THREE.Group {
+  const { hw, rise, depth } = wedgeDimensions(stats.parts.chassis);
+  const group = new THREE.Group();
+
+  const spans: [number, number][] =
+    style === 'solid'
+      ? [[-hw, hw]]
+      : [
+          [-hw, -hw * 0.46],
+          [-hw * 0.2, hw * 0.2],
+          [hw * 0.46, hw],
+        ];
+
+  for (const [xMin, xMax] of spans) {
+    const ramp = new THREE.Mesh(rampGeometry(registry, { xMin, xMax, rise, depth }), material);
+    ramp.castShadow = true;
+    ramp.receiveShadow = true;
+    group.add(ramp);
+  }
+
+  // A crossbar tying the prongs together at the back, where they bolt to the frame.
+  const crossbar = new THREE.Mesh(
+    registry.geometry(new THREE.BoxGeometry(hw * 2, rise * 0.42, 0.022)),
+    material,
+  );
+  crossbar.position.set(0, rise * 0.24, 0.012);
+  crossbar.castShadow = true;
+  group.add(crossbar);
+
+  // Hardened tips on the leading edge of each prong.
+  const tipGeom = registry.geometry(new THREE.BoxGeometry(1, 0.007, depth * 0.34));
+  for (const [xMin, xMax] of spans) {
+    const tip = new THREE.Mesh(tipGeom, material);
+    tip.scale.x = (xMax - xMin) * 0.92;
+    tip.position.set((xMin + xMax) / 2, 0.0045, depth * 0.84);
+    tip.castShadow = true;
+    group.add(tip);
+  }
+
+  const cluster = boltCluster(
+    registry,
+    hexBoltGeometry(registry, 0.008),
+    boltMaterial,
+    rowPlacements({
+      count: 5,
+      from: new THREE.Vector3(-hw * 0.8, rise * 0.24, 0.025),
+      to: new THREE.Vector3(hw * 0.8, rise * 0.24, 0.025),
+      normal: new THREE.Vector3(0, 0, 1),
+    }),
+  );
+  if (cluster) group.add(cluster);
+
+  return group;
+}
+
+// ---------------------------------------------------------------------------
+// The machine
+// ---------------------------------------------------------------------------
+
+export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 | 1): BotVisual {
   const { chassis, weapon, wheel, armor, weaponMaterial } = stats.parts;
+  const registry = new GeometryRegistry();
+
   const root = new THREE.Group();
   root.name = `bot-${design.name}`;
   const body = new THREE.Group();
   root.add(body);
 
   const seed = team === 0 ? 5 : 11;
-  const paintMat = liveryMaterial(design, seed);
-  const frameMat = rawMetalMaterial(armor.colorHint, seed + 1, armor.roughness);
-  const weaponMat = rawMetalMaterial(weaponMaterial.colorHint, seed + 2, weaponMaterial.roughness);
-
-  // --- Frame -------------------------------------------------------------
-  const frame = new THREE.Mesh(
-    bevelledBox(chassis.width * 0.94, chassis.height * 0.86, chassis.length * 0.94),
-    frameMat,
+  const paintMat = liveryMaterial(registry, design, seed);
+  const frameMat = rawMetalMaterial(registry, armor.colorHint, seed + 1, armor.roughness);
+  const weaponMat = rawMetalMaterial(
+    registry,
+    weaponMaterial.colorHint,
+    seed + 2,
+    weaponMaterial.roughness,
   );
-  frame.castShadow = true;
-  frame.receiveShadow = true;
-  body.add(frame);
+  const machinedMat = machinedMaterial(registry, seed + 3);
+  const hardwareMat = hardwareMaterial(registry, seed + 4);
 
-  // --- Armour panels -----------------------------------------------------
-  const armorPanels = new Map<ArmorFace, THREE.Mesh>();
-  const plate = Math.max(0.008, stats.parts.chassis.armorArea > 0 ? design.armorThicknessMm / 1000 : 0.008);
   const hw = chassis.width / 2;
   const hh = chassis.height / 2;
   const hl = chassis.length / 2;
+  const plate = Math.max(0.006, design.armorThicknessMm / 1000);
 
-  const panelDefs: { face: ArmorFace; geom: [number, number, number]; pos: [number, number, number] }[] = [
-    { face: 'front', geom: [chassis.width, chassis.height, plate], pos: [0, 0, hl] },
-    { face: 'rear', geom: [chassis.width, chassis.height, plate], pos: [0, 0, -hl] },
-    { face: 'left', geom: [plate, chassis.height, chassis.length], pos: [-hw, 0, 0] },
-    { face: 'right', geom: [plate, chassis.height, chassis.length], pos: [hw, 0, 0] },
-    { face: 'top', geom: [chassis.width, plate, chassis.length], pos: [0, hh, 0] },
-    { face: 'bottom', geom: [chassis.width, plate, chassis.length], pos: [0, -hh, 0] },
+  // --- Welded frame ------------------------------------------------------
+  // Corner posts and perimeter rails, visible in the gaps between the armour.
+  const railThickness = Math.min(0.03, chassis.height * 0.12);
+  const postGeom = registry.geometry(
+    new THREE.BoxGeometry(railThickness, chassis.height * 0.92, railThickness),
+  );
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      const post = new THREE.Mesh(postGeom, frameMat);
+      post.position.set(sx * (hw - railThickness), 0, sz * (hl - railThickness));
+      post.castShadow = true;
+      body.add(post);
+    }
+  }
+
+  const longRail = registry.geometry(
+    new THREE.BoxGeometry(railThickness, railThickness, chassis.length * 0.94),
+  );
+  const crossRail = registry.geometry(
+    new THREE.BoxGeometry(chassis.width * 0.94, railThickness, railThickness),
+  );
+  for (const sy of [-1, 1]) {
+    for (const sx of [-1, 1]) {
+      const rail = new THREE.Mesh(longRail, frameMat);
+      rail.position.set(sx * (hw - railThickness), sy * (hh - railThickness), 0);
+      rail.castShadow = true;
+      body.add(rail);
+    }
+    for (const sz of [-1, 1]) {
+      const rail = new THREE.Mesh(crossRail, frameMat);
+      rail.position.set(0, sy * (hh - railThickness), sz * (hl - railThickness));
+      rail.castShadow = true;
+      body.add(rail);
+    }
+  }
+
+  // The belly pan the batteries and motors sit on.
+  const bellyPan = new THREE.Mesh(
+    registry.geometry(
+      new THREE.BoxGeometry(chassis.width * 0.86, 0.01, chassis.length * 0.86),
+    ),
+    machinedMat,
+  );
+  bellyPan.position.y = -hh + chassis.height * 0.16;
+  body.add(bellyPan);
+
+  // --- Internals ---------------------------------------------------------
+  // Drive motors down each side, and a battery pack between them. These are only
+  // glimpsed through the gaps, but they are why the machine has a belly at all.
+  const canRadius = Math.min(0.038, chassis.height * 0.16);
+  const canLength = Math.min(0.13, chassis.length * 0.2);
+  const perSide = Math.max(1, Math.floor(chassis.wheelCount / 2));
+  for (const sx of [-1, 1]) {
+    for (let i = 0; i < perSide; i++) {
+      const t = perSide === 1 ? 0.5 : i / (perSide - 1);
+      const can = motorCan(registry, hardwareMat, { radius: canRadius, length: canLength });
+      can.position.set(
+        sx * (hw - canLength * 0.62),
+        -hh + chassis.height * 0.3,
+        -chassis.length * 0.3 + t * chassis.length * 0.6,
+      );
+      if (sx < 0) can.rotation.y = Math.PI;
+      body.add(can);
+    }
+  }
+
+  const battery = new THREE.Mesh(
+    registry.geometry(
+      new THREE.BoxGeometry(chassis.width * 0.34, chassis.height * 0.3, chassis.length * 0.3),
+    ),
+    hardwareMat,
+  );
+  battery.position.set(0, -hh + chassis.height * 0.34, -chassis.length * 0.12);
+  body.add(battery);
+
+  // --- Armour panels -----------------------------------------------------
+  const armorPanels = new Map<ArmorFace, THREE.Mesh>();
+  const boltGeom = hexBoltGeometry(registry, Math.max(0.006, plate * 0.55));
+
+  interface PanelDef {
+    face: ArmorFace;
+    width: number;
+    height: number;
+    position: [number, number, number];
+    rotation: [number, number, number];
+    normal: THREE.Vector3;
+  }
+
+  // Panels are inset so the frame rails and corner posts stay visible around
+  // them. That gap is the whole difference between "a painted box" and "plate
+  // bolted into a welded frame".
+  const inset = railThickness * 2.1;
+  const panelDefs: PanelDef[] = [
+    {
+      face: 'front',
+      width: chassis.width - inset,
+      height: chassis.height - inset,
+      position: [0, 0, hl + plate / 2],
+      rotation: [0, 0, 0],
+      normal: new THREE.Vector3(0, 0, 1),
+    },
+    {
+      face: 'rear',
+      width: chassis.width - inset,
+      height: chassis.height - inset,
+      position: [0, 0, -hl - plate / 2],
+      rotation: [0, Math.PI, 0],
+      normal: new THREE.Vector3(0, 0, -1),
+    },
+    {
+      face: 'left',
+      width: chassis.length - inset,
+      height: chassis.height - inset,
+      position: [-hw - plate / 2, 0, 0],
+      rotation: [0, -Math.PI / 2, 0],
+      normal: new THREE.Vector3(-1, 0, 0),
+    },
+    {
+      face: 'right',
+      width: chassis.length - inset,
+      height: chassis.height - inset,
+      position: [hw + plate / 2, 0, 0],
+      rotation: [0, Math.PI / 2, 0],
+      normal: new THREE.Vector3(1, 0, 0),
+    },
+    {
+      face: 'top',
+      width: chassis.width - inset,
+      height: chassis.length - inset,
+      position: [0, hh + plate / 2, 0],
+      rotation: [-Math.PI / 2, 0, 0],
+      normal: new THREE.Vector3(0, 1, 0),
+    },
+    {
+      face: 'bottom',
+      width: chassis.width - inset,
+      height: chassis.length - inset,
+      position: [0, -hh - plate / 2, 0],
+      rotation: [Math.PI / 2, 0, 0],
+      normal: new THREE.Vector3(0, -1, 0),
+    },
   ];
 
   for (const def of panelDefs) {
-    const mesh = new THREE.Mesh(
-      track(new THREE.BoxGeometry(def.geom[0], def.geom[1], def.geom[2])),
-      paintMat.clone(),
+    // A panel is its own group so its fasteners come off with it when it is torn
+    // away — armour and the bolts holding it are one part, physically.
+    const panel = new THREE.Mesh(
+      chamferedPlate(registry, {
+        width: def.width,
+        height: def.height,
+        thickness: plate,
+      }),
+      registry.material(paintMat.clone()),
     );
-    mesh.position.set(def.pos[0], def.pos[1], def.pos[2]);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.name = `armor-${def.face}`;
-    body.add(mesh);
-    armorPanels.set(def.face, mesh);
+    panel.position.set(...def.position);
+    panel.rotation.set(...def.rotation);
+    panel.castShadow = true;
+    panel.receiveShadow = true;
+    panel.name = `armor-${def.face}`;
+
+    // Fasteners around the perimeter, in the panel's own local frame.
+    const insetX = def.width / 2 - Math.max(0.022, plate * 1.6);
+    const insetY = def.height / 2 - Math.max(0.022, plate * 1.6);
+    const boltNormal = new THREE.Vector3(0, 0, 1);
+    const perimeter: BoltPlacement[] = [
+      ...rowPlacements({
+        count: 4,
+        from: new THREE.Vector3(-insetX, insetY, plate / 2),
+        to: new THREE.Vector3(insetX, insetY, plate / 2),
+        normal: boltNormal,
+      }),
+      ...rowPlacements({
+        count: 4,
+        from: new THREE.Vector3(-insetX, -insetY, plate / 2),
+        to: new THREE.Vector3(insetX, -insetY, plate / 2),
+        normal: boltNormal,
+      }),
+      ...rowPlacements({
+        count: 2,
+        from: new THREE.Vector3(-insetX, -insetY * 0.4, plate / 2),
+        to: new THREE.Vector3(-insetX, insetY * 0.4, plate / 2),
+        normal: boltNormal,
+      }),
+      ...rowPlacements({
+        count: 2,
+        from: new THREE.Vector3(insetX, -insetY * 0.4, plate / 2),
+        to: new THREE.Vector3(insetX, insetY * 0.4, plate / 2),
+        normal: boltNormal,
+      }),
+    ];
+    const cluster = boltCluster(registry, boltGeom, hardwareMat, perimeter);
+    if (cluster) panel.add(cluster);
+
+    body.add(panel);
+    armorPanels.set(def.face, panel);
   }
 
-  // --- Wedge / forks -----------------------------------------------------
+  // --- Wedge, wedgelets, skirts -----------------------------------------
   if (weapon.kind === 'wedge' || stats.parts.accessories.includes('forks')) {
-    const wedge = buildWedge(stats, weapon.kind === 'wedge' ? paintMat : frameMat);
+    const isWeaponWedge = weapon.kind === 'wedge';
+    const wedge = buildWedge(
+      registry,
+      stats,
+      isWeaponWedge ? paintMat : frameMat,
+      hardwareMat,
+      isWeaponWedge ? 'solid' : 'forks',
+    );
     wedge.position.set(0, -hh, hl - 0.01);
     body.add(wedge);
   }
 
   if (stats.parts.accessories.includes('wedgelets')) {
-    const geom = track(new THREE.BoxGeometry(chassis.width * 0.26, 0.012, 0.14));
+    const geom = chamferedPlate(registry, {
+      width: chassis.width * 0.26,
+      height: 0.14,
+      thickness: 0.012,
+    });
     for (const sign of [-1, 1]) {
-      const wedgelet = new THREE.Mesh(geom, frameMat);
-      wedgelet.position.set(sign * chassis.width * 0.3, -hh + 0.006, hl + 0.06);
-      wedgelet.rotation.x = -0.09;
+      const wedgelet = new THREE.Mesh(geom, machinedMat);
+      wedgelet.position.set(sign * chassis.width * 0.3, -hh + 0.006, hl + 0.07);
+      wedgelet.rotation.set(-Math.PI / 2 - 0.09, 0, 0);
+      wedgelet.castShadow = true;
       body.add(wedgelet);
     }
   }
 
   if (stats.parts.accessories.includes('skirts')) {
-    const geom = track(new THREE.BoxGeometry(0.01, chassis.height * 0.4, chassis.length * 0.9));
+    const geom = chamferedPlate(registry, {
+      width: chassis.length * 0.9,
+      height: chassis.height * 0.4,
+      thickness: 0.008,
+    });
     for (const sign of [-1, 1]) {
-      const skirt = new THREE.Mesh(geom, frameMat);
-      skirt.position.set(sign * (hw + 0.008), -hh - chassis.height * 0.12, 0);
+      const skirt = new THREE.Mesh(geom, machinedMat);
+      skirt.position.set(sign * (hw + plate + 0.006), -hh - chassis.height * 0.12, 0);
+      skirt.rotation.y = (sign * Math.PI) / 2;
+      skirt.castShadow = true;
       body.add(skirt);
     }
   }
 
   // --- Wheels ------------------------------------------------------------
   const tyre = makeTyreTexture();
-  const tyreMat = new THREE.MeshStandardMaterial({
-    map: tyre.map,
-    normalMap: tyre.normalMap,
-    roughnessMap: tyre.roughnessMap,
-    color: 0x2a2d31,
-    metalness: 0.05,
-    roughness: 0.85,
+  const tyreMat = registry.material(
+    new THREE.MeshStandardMaterial({
+      map: tyre.map,
+      normalMap: tyre.normalMap,
+      roughnessMap: tyre.roughnessMap,
+      color: 0x2a2d31,
+      metalness: 0.05,
+      roughness: 0.85,
+    }),
+  );
+
+  const tyreGeom = registry.geometry(
+    new THREE.CylinderGeometry(wheel.radius, wheel.radius, wheel.width, 26, 1),
+  );
+  const rimGeom = registry.geometry(
+    new THREE.CylinderGeometry(wheel.radius * 0.64, wheel.radius * 0.64, wheel.width * 1.04, 20),
+  );
+  const hubGeom = registry.geometry(
+    new THREE.CylinderGeometry(wheel.radius * 0.22, wheel.radius * 0.22, wheel.width * 1.3, 12),
+  );
+  const spokeGeom = registry.geometry(
+    new THREE.BoxGeometry(wheel.width * 0.55, wheel.radius * 0.44, wheel.radius * 0.16),
+  );
+  const sprocket = sprocketGeometry(registry, {
+    radius: wheel.radius * 0.42,
+    teeth: 14,
+    thickness: wheel.width * 0.16,
   });
-  const hubMat = rawMetalMaterial(0xb8bec6, seed + 3, 0.3);
-  const wheelGeom = track(
-    new THREE.CylinderGeometry(wheel.radius, wheel.radius, wheel.width, 22, 1),
-  );
-  const hubGeom = track(
-    new THREE.CylinderGeometry(wheel.radius * 0.42, wheel.radius * 0.42, wheel.width * 1.08, 12),
-  );
+  const wheelBoltGeom = flushBoltGeometry(registry, wheel.radius * 0.05);
 
   const wheels: THREE.Object3D[] = [];
   for (let i = 0; i < chassis.wheelCount; i++) {
     const group = new THREE.Group();
-    const tyreMesh = new THREE.Mesh(wheelGeom, tyreMat);
+
+    const tyreMesh = new THREE.Mesh(tyreGeom, tyreMat);
     tyreMesh.rotation.z = Math.PI / 2;
     tyreMesh.castShadow = true;
     group.add(tyreMesh);
-    const hub = new THREE.Mesh(hubGeom, hubMat);
+
+    const rim = new THREE.Mesh(rimGeom, machinedMat);
+    rim.rotation.z = Math.PI / 2;
+    group.add(rim);
+
+    const hub = new THREE.Mesh(hubGeom, machinedMat);
     hub.rotation.z = Math.PI / 2;
     group.add(hub);
+
+    // Spokes between hub and rim, so the wheel is not a solid puck.
+    for (let s = 0; s < 5; s++) {
+      const a = (s / 5) * Math.PI * 2;
+      const spoke = new THREE.Mesh(spokeGeom, machinedMat);
+      spoke.position.set(0, Math.cos(a) * wheel.radius * 0.42, Math.sin(a) * wheel.radius * 0.42);
+      spoke.rotation.x = -a;
+      group.add(spoke);
+    }
+
+    // Drive sprocket on the inboard face.
+    const sprocketMesh = new THREE.Mesh(sprocket, hardwareMat);
+    sprocketMesh.position.x = -wheel.width * 0.62;
+    group.add(sprocketMesh);
+
+    const cluster = boltCluster(
+      registry,
+      wheelBoltGeom,
+      hardwareMat,
+      ringPlacements({
+        count: 5,
+        radius: wheel.radius * 0.34,
+        axis: 'x',
+        offset: wheel.width * 0.54,
+        facing: 1,
+      }),
+    );
+    if (cluster) group.add(cluster);
+
     root.add(group);
     wheels.push(group);
   }
@@ -466,28 +1083,134 @@ export function buildBotVisual(
   // --- Weapon ------------------------------------------------------------
   let weaponGroup: THREE.Group | null = null;
   let weaponPivot: THREE.Group | null = null;
+
   if (weapon.rotor) {
     weaponPivot = new THREE.Group();
-    weaponGroup = buildRotor(stats, weaponMat);
+    weaponGroup = buildRotor(registry, stats, weaponMat, machinedMat, hardwareMat);
     weaponPivot.add(weaponGroup);
     root.add(weaponPivot);
 
-    // Weapon uprights, so the rotor visibly belongs to the machine.
-    const postGeom = track(new THREE.BoxGeometry(0.035, chassis.height * 0.8, 0.05));
-    for (const sign of [-1, 1]) {
-      const post = new THREE.Mesh(postGeom, frameMat);
-      post.position.set(
-        sign * (weapon.rotor.axis === 'x' ? chassis.width * 0.42 : chassis.width * 0.2),
-        chassis.weaponMount.y * 0.4,
-        chassis.weaponMount.z * 0.72,
+    const mount = chassis.weaponMount;
+    const axis = weapon.rotor.axis;
+
+    if (axis === 'x') {
+      /*
+       * A vertical weapon hangs between two uprights at the nose, with the motor
+       * and belt outboard on one side — exactly where you can see them.
+       */
+      const standoff = chassis.width * 0.42;
+
+      for (const sign of [-1, 1]) {
+        const upright = new THREE.Mesh(
+          registry.geometry(new THREE.BoxGeometry(0.032, chassis.height * 0.75, 0.055)),
+          frameMat,
+        );
+        upright.position.set(sign * standoff, mount.y * 0.35, mount.z * 0.7);
+        upright.castShadow = true;
+        body.add(upright);
+
+        const block = pillowBlock(registry, machinedMat, { bore: 0.017, width: 0.05 });
+        block.position.set(sign * standoff, mount.y, mount.z);
+        body.add(block);
+      }
+
+      const rotorPulleyRadius = Math.max(0.03, weapon.rotor.radius * 0.2);
+      const motorPulleyRadius = rotorPulleyRadius * 0.5;
+      const beltSpan = 0.24;
+
+      const beltGroup = new THREE.Group();
+      beltGroup.position.set(standoff + 0.05, mount.y, mount.z);
+      // Turn the band so it is extruded along the rotor's spin axis.
+      beltGroup.rotation.y = Math.PI / 2;
+
+      const belt = beltBand(registry, hardwareMat, {
+        centerA: new THREE.Vector2(0, 0),
+        radiusA: rotorPulleyRadius,
+        centerB: new THREE.Vector2(beltSpan, -0.07),
+        radiusB: motorPulleyRadius,
+        width: 0.022,
+        thickness: 0.005,
+      });
+      if (belt) beltGroup.add(belt);
+
+      const drivePulley = pulley(registry, machinedMat, {
+        radius: rotorPulleyRadius,
+        width: 0.026,
+      });
+      drivePulley.rotation.y = Math.PI / 2;
+      beltGroup.add(drivePulley);
+
+      const motorPulley = pulley(registry, machinedMat, {
+        radius: motorPulleyRadius,
+        width: 0.024,
+      });
+      motorPulley.rotation.y = Math.PI / 2;
+      motorPulley.position.set(-beltSpan, -0.07, 0);
+      beltGroup.add(motorPulley);
+      body.add(beltGroup);
+
+      const weaponMotor = motorCan(registry, hardwareMat, { radius: 0.042, length: 0.15 });
+      weaponMotor.position.set(standoff * 0.5, mount.y - 0.07, mount.z - beltSpan);
+      body.add(weaponMotor);
+    } else {
+      /*
+       * A full-body horizontal weapon rides on a single central turret, and its
+       * motor lives down inside the shell. Hanging the same two-upright rig off
+       * this one piles hardware on top of the machine and hides the bar, which is
+       * the one part of a horizontal spinner anybody wants to see.
+       */
+      const turret = new THREE.Mesh(
+        registry.geometry(
+          new THREE.CylinderGeometry(0.05, 0.075, Math.max(0.04, mount.y - hh + 0.06), 16),
+        ),
+        machinedMat,
       );
-      body.add(post);
+      turret.position.set(mount.x, (hh + mount.y) / 2, mount.z);
+      turret.castShadow = true;
+      body.add(turret);
+
+      const collar = new THREE.Mesh(
+        registry.geometry(new THREE.CylinderGeometry(0.058, 0.058, 0.022, 18)),
+        hardwareMat,
+      );
+      collar.position.set(mount.x, mount.y - 0.02, mount.z);
+      body.add(collar);
+
+      const turretBolts = boltCluster(
+        registry,
+        hexBoltGeometry(registry, 0.008),
+        hardwareMat,
+        ringPlacements({
+          count: 8,
+          radius: 0.062,
+          axis: 'y',
+          offset: hh + plate + 0.004,
+          facing: 1,
+        }),
+      );
+      if (turretBolts) body.add(turretBolts);
+
+      // The weapon motor stands on end inside the shell, driving up to the turret.
+      const weaponMotor = motorCan(registry, hardwareMat, { radius: 0.04, length: 0.14 });
+      weaponMotor.rotation.z = Math.PI / 2;
+      weaponMotor.position.set(mount.x, -hh + chassis.height * 0.45, mount.z - chassis.length * 0.2);
+      body.add(weaponMotor);
     }
+
   } else if (weapon.actuator || weapon.clamp) {
     weaponPivot = new THREE.Group();
-    weaponGroup = buildArm(stats, weaponMat);
+    weaponGroup = buildArm(registry, stats, weaponMat, machinedMat, hardwareMat);
     weaponPivot.add(weaponGroup);
     root.add(weaponPivot);
+
+    // Gas bottle and ram for a pneumatic weapon.
+    const bottle = new THREE.Mesh(
+      registry.geometry(new THREE.CylinderGeometry(0.045, 0.045, chassis.length * 0.4, 16)),
+      hardwareMat,
+    );
+    bottle.rotation.x = Math.PI / 2;
+    bottle.position.set(chassis.width * 0.22, -hh + chassis.height * 0.42, -chassis.length * 0.18);
+    body.add(bottle);
   }
 
   // --- Lights ------------------------------------------------------------
@@ -499,26 +1222,26 @@ export function buildBotVisual(
   // also the only way the audience tells two dark machines apart.
   const teamColor = team === 0 ? 0xff2b2b : 0x2b6bff;
   const teamLight = new THREE.Mesh(
-    track(new THREE.SphereGeometry(0.035, 12, 10)),
-    new THREE.MeshStandardMaterial({
-      color: teamColor,
-      emissive: teamColor,
-      emissiveIntensity: 3.4,
-      roughness: 0.3,
-    }),
+    registry.geometry(new THREE.SphereGeometry(0.032, 12, 10)),
+    registry.material(
+      new THREE.MeshStandardMaterial({
+        color: teamColor,
+        emissive: teamColor,
+        emissiveIntensity: 3.4,
+        roughness: 0.3,
+      }),
+    ),
   );
-  teamLight.position.set(0, hh + 0.03, -hl * 0.55);
+  teamLight.position.set(0, hh + plate + 0.03, -hl * 0.55);
   body.add(teamLight);
 
-  const dispose = () => {
-    root.traverse((object) => {
-      if (object instanceof THREE.Mesh) {
-        const material = object.material;
-        if (Array.isArray(material)) material.forEach((m) => m.dispose());
-        else material.dispose();
-      }
-    });
-  };
+  // A stalk so the indicator reads as fitted equipment rather than a floating dot.
+  const stalk = new THREE.Mesh(
+    registry.geometry(new THREE.CylinderGeometry(0.006, 0.008, 0.04, 8)),
+    hardwareMat,
+  );
+  stalk.position.set(0, hh + plate + 0.005, -hl * 0.55);
+  body.add(stalk);
 
   return {
     root,
@@ -529,6 +1252,6 @@ export function buildBotVisual(
     weaponPivot,
     underglow,
     teamLight,
-    dispose,
+    dispose: () => registry.dispose(),
   };
 }
