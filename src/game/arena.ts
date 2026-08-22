@@ -27,7 +27,16 @@ import { getRenderProfile } from '../render/profile.ts';
 /** Inner clear span of the box, metres. The real thing is 48 feet square. */
 export const ARENA_SIZE = 14.63;
 export const ARENA_HALF = ARENA_SIZE / 2;
-export const WALL_HEIGHT = 1.3;
+/*
+ * The polycarbonate is 2.4 m, not 1.3, and there is a screened roof over it.
+ *
+ * At 1.3 m a spinner exchange routinely threw a machine clean out of an
+ * open-topped box and ended the fight in seconds — which is not how the sport
+ * works, and made every big hit an anticlimax rather than the moment it should
+ * be. The real arena is roughly this tall and lidded, so a machine that gets
+ * launched comes back down inside it.
+ */
+export const WALL_HEIGHT = 2.4;
 const WALL_THICKNESS = 0.3;
 
 /** Where each team is released from. */
@@ -186,6 +195,16 @@ export class Arena {
         half: [WALL_THICKNESS / 2, WALL_HEIGHT / 2, ARENA_HALF + WALL_THICKNESS],
       },
     ];
+
+    /*
+     * The roof. Thin, high, and collision-only — a machine thrown at the ceiling
+     * should come back down rather than leave, and the camera never goes up there
+     * so there is nothing to draw.
+     */
+    specs.push({
+      pos: [0, WALL_HEIGHT + 0.15, 0],
+      half: [ARENA_HALF + WALL_THICKNESS, 0.15, ARENA_HALF + WALL_THICKNESS],
+    });
 
     for (const spec of specs) {
       const desc = RAPIER.ColliderDesc.cuboid(spec.half[0], spec.half[1], spec.half[2])
@@ -731,7 +750,7 @@ export class Arena {
       Math.abs(position.x) > limit ||
       Math.abs(position.z) > limit ||
       position.y < -1.5 ||
-      position.y > 6
+      position.y > WALL_HEIGHT + 1.5
     );
   }
 

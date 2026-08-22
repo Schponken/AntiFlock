@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { ARENA_HALF, WALL_HEIGHT } from '../game/arena.ts';
 import { clamp01, damp } from '../core/mathx.ts';
 import { getRenderProfile } from './profile.ts';
+import { prefersReducedMotion } from '../core/motion.ts';
 import { makeLampGrid } from './textures.ts';
 
 interface Searchlight {
@@ -30,6 +31,8 @@ export class LightRig {
   private bankPanels: THREE.Mesh[] = [];
   private searchlights: Searchlight[] = [];
   private wallWashes: THREE.PointLight[] = [];
+  /** One decaying flare value per wash, so a single corner can be lit alone. */
+  private washPulses: number[] = [];
   private strobeLight: THREE.PointLight;
   private impactFlash: THREE.PointLight;
 
@@ -41,7 +44,6 @@ export class LightRig {
   private sweepLevel = 0;
   private strobeUntil = 0;
   private strobeStrength = 0;
-  private washPulse = 0;
   private elapsed = 0;
 
   private headless: boolean;
@@ -154,6 +156,7 @@ export class LightRig {
       wash.position.set(0, WALL_HEIGHT + 0.9, sign * (ARENA_HALF - 0.6));
       this.group.add(wash);
       this.wallWashes.push(wash);
+      this.washPulses.push(0);
     }
 
     this.strobeLight = new THREE.PointLight(0xffffff, 0, 40, 1.6);
@@ -207,7 +210,22 @@ export class LightRig {
 
   /** Kick the team wall washes, e.g. on a knockout. */
   pulseWash(strength = 1): void {
-    this.washPulse = Math.max(this.washPulse, clamp01(strength));
+    for (let i = 0; i < this.washPulses.length; i++) {
+      this.washPulses[i] = Math.max(this.washPulses[i]!, clamp01(strength));
+    }
+  }
+
+  /**
+   * Flare one team's wall wash on its own.
+   *
+   * The introductions light one corner at a time — that is the whole point of the
+   * beat — and firing both washes together during each one threw away the only
+   * cue distinguishing the red corner from the blue.
+   */
+  pulseWashFor(team: 0 | 1, strength = 1): void {
+    for (let i = team; i < this.washPulses.length; i += 2) {
+      this.washPulses[i] = Math.max(this.washPulses[i]!, clamp01(strength));
+    }
   }
 
   /** A brief orange flare at an impact point. */
@@ -224,7 +242,7 @@ export class LightRig {
     this.setSweeping(false);
     this.stopStrobe();
     this.sweepLevel = 0;
-    this.washPulse = 0;
+    this.washPulses.fill(0);
   }
 
   /** Normal, fully-lit arena — the state a practice session starts in. */
@@ -285,9 +303,10 @@ export class LightRig {
     }
 
     // Wall washes idle low and flare when something big happens.
-    this.washPulse = Math.max(0, this.washPulse - dt * 1.6);
-    for (const wash of this.wallWashes) {
-      wash.intensity = (0.18 + this.sweepLevel * 0.5 + this.washPulse * 2.2) * 12;
+    for (let i = 0; i < this.wallWashes.length; i++) {
+      const pulse = Math.max(0, (this.washPulses[i] ?? 0) - dt * 1.6);
+      this.washPulses[i] = pulse;
+      this.wallWashes[i]!.intensity = (0.18 + this.sweepLevel * 0.5 + pulse * 2.2) * 12;
     }
 
     if (this.elapsed < this.strobeUntil) {
@@ -321,20 +340,5 @@ export class LightRig {
         else material.dispose();
       }
     });
-  }
-}
-
-/**
- * Whether the viewer has asked the platform for reduced motion.
- *
- * Read live rather than cached: the preference can be changed while the page is
- * open, and there is no cost to asking. Guarded for headless runs, where there is
- * no `matchMedia` at all.
- */
-function prefersReducedMotion(): boolean {
-  try {
-    return globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-  } catch {
-    return false;
   }
 }

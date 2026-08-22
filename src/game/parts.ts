@@ -830,6 +830,36 @@ export const DECALS: readonly { id: DecalId; name: string }[] = [
 // ---------------------------------------------------------------------------
 
 /**
+ * Where the wheels sit on a given frame.
+ *
+ * One description, used by the drivetrain that raycasts from these points, the
+ * mesh that draws the wheels and cuts the arches for them, and the workshop
+ * preview. It was written out three times, which is two opportunities for the
+ * collider and the model to disagree about where a wheel is — and they did.
+ */
+export function driveLayout(
+  chassis: ChassisSpec,
+  wheel: WheelSpec,
+): {
+  halfTrack: number;
+  /** Height of the wheel centre in body coordinates, the right way up. */
+  wheelLocalY: number;
+  rows: number;
+  /** Body-frame z of each row of wheels, front to back. */
+  rowZ: number[];
+} {
+  const halfTrack = chassis.width / 2 - wheel.width * 0.15;
+  const wheelLocalY = wheel.radius - chassis.height / 2 - chassis.groundClearance;
+  const rows = chassis.wheelCount / 2;
+  const usableLength = chassis.length / 2 - wheel.radius - 0.03;
+  const rowZ: number[] = [];
+  for (let row = 0; row < rows; row++) {
+    rowZ.push(rows === 1 ? 0 : -usableLength + (2 * usableLength * row) / (rows - 1));
+  }
+  return { halfTrack, wheelLocalY, rows, rowZ };
+}
+
+/**
  * Mass of a spinning weapon element, from its geometry and material.
  * Each shape uses its real swept volume rather than a fudge factor.
  */

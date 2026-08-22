@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import { clamp } from '../src/core/mathx.ts';
 import { FIXED_DT, PhysicsWorld, initRapier } from '../src/physics/world.ts';
 import { Combat } from '../src/game/combat.ts';
-import { ARENA_HALF, Arena } from '../src/game/arena.ts';
+import { ARENA_HALF, Arena, WALL_HEIGHT } from '../src/game/arena.ts';
 import { BotAI, type Difficulty } from '../src/game/ai.ts';
 import {
   PRESETS,
@@ -39,6 +39,7 @@ import {
   transferFraction,
 } from '../src/game/damage.ts';
 import { DEBRIS_GROUPS, Layer, filterOf } from '../src/physics/groups.ts';
+import { HIT_COOLDOWN } from '../src/game/combat.ts';
 import type { Bot } from '../src/game/bot.ts';
 import { StartSequence } from '../src/game/startSequence.ts';
 import { panelGeometry } from '../src/render/botMesh.ts';
@@ -739,6 +740,32 @@ describe('arena', () => {
     world.free();
   });
 
+  it('keeps a launched machine inside the box', () => {
+    /*
+     * The walls were 1.3 m and the box had no lid, so a spinner exchange routinely
+     * threw a machine clean out of the arena and ended the fight in seconds. The
+     * real thing is roughly twice that and screened over the top.
+     */
+    expect(WALL_HEIGHT).toBeGreaterThan(2);
+
+    const { world, combat, red } = fight(
+      presetById('sparkplug').design,
+      presetById('anvilhead').design,
+    );
+    // Fire it at the ceiling hard enough to leave an open-topped box.
+    const chassis = (red as unknown as { chassis: any }).chassis;
+    chassis.setLinvel({ x: 0, y: 14, z: 0 }, true);
+
+    let escaped = false;
+    for (let i = 0; i < Math.round(6 / FIXED_DT); i++) {
+      world.step();
+      if (combat.arena.isOutOfBounds(red.position())) escaped = true;
+    }
+    expect(escaped, 'a machine thrown upwards left the arena').toBe(false);
+    expect(red.position().y, 'it never came back down').toBeLessThan(1);
+    world.free();
+  });
+
   it('lets debris be hit by a live weapon', () => {
     // Interaction is an AND of both filters, so the weapon layers have to appear
     // on the debris side too.
@@ -771,6 +798,33 @@ describe('arena', () => {
 // ---------------------------------------------------------------------------
 
 describe('opponent AI', () => {
+  it('drives better on a higher difficulty', () => {
+    /*
+     * The three profiles were interchangeable as far as the suite was concerned:
+     * every field of `PROFILES` could be flattened to one value with everything
+     * green. Same seed, same fight, same duration — only the driver changes.
+     */
+    const closest = (difficulty: Difficulty): number => {
+      const { world, combat, red, blue } = fight(
+        presetById('sparkplug').design,
+        presetById('anvilhead').design,
+      );
+      const ai = new BotAI(blue, combat.arena, difficulty, 4242);
+      let nearest = Infinity;
+      for (let i = 0; i < Math.round(20 / FIXED_DT); i++) {
+        if (i % 8 === 0) blue.setInput(ai.update(FIXED_DT * 8, red));
+        world.step();
+        nearest = Math.min(nearest, blue.position().distanceTo(red.position()));
+      }
+      world.free();
+      return nearest;
+    };
+
+    const rookie = closest('rookie');
+    const champion = closest('champion');
+    expect(champion, 'a champion driver closed no better than a rookie').toBeLessThan(rookie);
+  });
+
   for (const difficulty of ['rookie', 'veteran', 'champion'] as Difficulty[]) {
     it(`drives and engages on ${difficulty}`, () => {
       // Both machines carry spinners, so "did it use its weapon" is a question
@@ -856,11 +910,33 @@ describe('accessories', () => {
     // Wedgelets are two real ramps, not two meshes.
     expect(colliders(['wedgelets'])).toBeGreaterThan(colliders([]));
 
-    // Skirts change where a low side hit lands: they exist to keep weapons out of
-    // the wheels, and the damage model now knows it.
-    const stats = computeStats({ ...base, accessories: ['skirts'] });
-    expect(stats.parts.accessories).toContain('skirts');
-    expect(stats.totalMass).toBeGreaterThan(computeStats({ ...base, accessories: [] }).totalMass);
+    /*
+     * Skirts exist to keep a weapon out of the wheels, so that is what to measure.
+     * Asserting that they add mass passes just as well when they do nothing at
+     * all — which is what they used to do.
+     */
+    const wheelHits = (accessories: BotDesign['accessories']): number => {
+      const { world, combat, bot } = solo({ ...base, accessories });
+      const target = combat as unknown as {
+        pickTargetPart(bot: Bot, face: string, at: THREE.Vector3): { kind: string };
+      };
+      const at = bot.position().clone();
+      // Low, and down the side: the contact a skirt is fitted to intercept.
+      at.y -= computeStats({ ...base, accessories }).parts.chassis.height * 0.4;
+      at.x += 0.3;
+
+      let wheels = 0;
+      for (let i = 0; i < 400; i++) {
+        if (target.pickTargetPart(bot, 'left', at).kind === 'wheel') wheels += 1;
+      }
+      world.free();
+      return wheels;
+    };
+
+    const bare = wheelHits([]);
+    const skirted = wheelHits(['skirts']);
+    expect(bare, 'low side hits never reached a wheel to begin with').toBeGreaterThan(50);
+    expect(skirted, 'the skirts kept nothing out of the wheels').toBeLessThan(bare * 0.6);
   });
 
   it('offers no meaningless rotor-material choice', () => {
@@ -1379,7 +1455,15 @@ describe('shoving and hazards', () => {
     run(world, seconds);
 
     expect(weaponHits, 'the weapon never landed').toBeGreaterThan(0);
-    expect(weaponHits, 'strikes were billed per step, not per tooth').toBeLessThan(seconds / 0.075);
+    /*
+     * The bound has to be what the cooldown actually sets, not a number so loose
+     * that removing the cooldown still satisfies it. `HIT_COOLDOWN` is 75 ms per
+     * attacker/defender pair, so ten seconds of continuous contact can bill at
+     * most 134 strikes — against the 4,800 a per-step billing would produce.
+     */
+    expect(weaponHits, 'strikes were billed per step, not per tooth').toBeLessThanOrEqual(
+      Math.ceil(seconds / HIT_COOLDOWN),
+    );
     world.free();
   });
 });

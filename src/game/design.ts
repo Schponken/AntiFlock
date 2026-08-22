@@ -203,7 +203,17 @@ export function computeStats(design: BotDesign): DerivedStats {
   const weaponEnergy = rotorEnergy(weaponInertia, maxOmega);
   const weaponTipSpeed = tipSpeed(weapon.rotor?.radius ?? 0, maxOmega);
   const spinPower = (weapon.rotor?.motorWatts ?? 1) * (hasBigBattery ? 1.28 : 1);
-  const weaponSpinupTime = weaponEnergy > 0 ? weaponEnergy / (spinPower * 0.82) : 0;
+  /*
+   * Time to 90% of redline under the motor curve the solver actually runs.
+   *
+   * `energy / power` is the time an *ideal* constant-power motor would take, and
+   * the weapon motor is a velocity motor with `factor = 4P/w_max^2`, whose speed
+   * approaches redline exponentially with time constant `tau = I/factor`. Quoting
+   * the ideal understated what the player waits for by about a factor of two, and
+   * the validator's threshold was calibrated against the wrong number.
+   */
+  const spinTau = maxOmega > 0 ? (weaponInertia * maxOmega * maxOmega) / (4 * spinPower) : 0;
+  const weaponSpinupTime = spinTau * Math.log(10); // ln(1 / (1 - 0.9))
 
   /*
    * A clamp is rated in newtons and everything else in joules, so the crusher
@@ -261,7 +271,13 @@ export function computeStats(design: BotDesign): DerivedStats {
     weaponSpinupTime,
     actuatorEnergy,
     groundClearance: chassis.groundClearance,
-    invertible: chassis.invertible,
+    /*
+     * A frame runs either way up if it was designed to, *or* if its wheels stand
+     * proud of both faces — which is what the Big Roller's own blurb promises and
+     * what nothing implemented. It is the only wheel in the catalogue tall enough
+     * to do it, and on the shallower frames it genuinely is.
+     */
+    invertible: chassis.invertible || wheel.radius * 2 > chassis.height + chassis.groundClearance,
     hasSrimech: parts.accessories.includes('srimech'),
     gyroPenalty,
     gyroCompensation,

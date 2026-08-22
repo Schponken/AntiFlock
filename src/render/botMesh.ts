@@ -14,7 +14,7 @@
 
 import * as THREE from 'three';
 import type { BotDesign, DerivedStats } from '../game/design.ts';
-import { finishById } from '../game/parts.ts';
+import { driveLayout, finishById } from '../game/parts.ts';
 import type { ArmorFace } from '../game/damage.ts';
 import { makeLiveryTexture, makeMetalTexture, makeTyreTexture } from './textures.ts';
 import {
@@ -800,13 +800,23 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
   // --- Welded frame ------------------------------------------------------
   // Corner posts and perimeter rails, visible in the gaps between the armour.
   const railThickness = Math.min(0.03, chassis.height * 0.12);
+  /*
+   * The frame has to stop short of the tyres.
+   *
+   * Rails, corner posts and the drive-motor cans were all placed from the hull's
+   * half-width, and the wheels sit inboard of that — so the machine's own
+   * structure ran straight through the inner face of every tyre. This is the
+   * furthest out any of them may go: the wheel's inner face, less a little.
+   */
+  const wheelInner = driveLayout(chassis, wheel).halfTrack - wheel.width / 2 - 0.004;
+  const frameHalfWidth = Math.min(hw, wheelInner);
   const postGeom = registry.geometry(
     new THREE.BoxGeometry(railThickness, chassis.height * 0.92, railThickness),
   );
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
       const post = new THREE.Mesh(postGeom, frameMat);
-      post.position.set(sx * (hw - railThickness), 0, sz * (hl - railThickness));
+      post.position.set(sx * (frameHalfWidth - railThickness), 0, sz * (hl - railThickness));
       post.castShadow = true;
       body.add(post);
     }
@@ -821,7 +831,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
   for (const sy of [-1, 1]) {
     for (const sx of [-1, 1]) {
       const rail = new THREE.Mesh(longRail, frameMat);
-      rail.position.set(sx * (hw - railThickness), sy * (hh - railThickness), 0);
+      rail.position.set(sx * (frameHalfWidth - railThickness), sy * (hh - railThickness), 0);
       rail.castShadow = true;
       body.add(rail);
     }
@@ -854,7 +864,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       const t = perSide === 1 ? 0.5 : i / (perSide - 1);
       const can = motorCan(registry, hardwareMat, { radius: canRadius, length: canLength });
       can.position.set(
-        sx * (hw - canLength * 0.62),
+        sx * (frameHalfWidth - canLength * 0.62),
         -hh + chassis.height * 0.3,
         -chassis.length * 0.3 + t * chassis.length * 0.6,
       );
@@ -895,14 +905,7 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
    * the drivetrain uses in `Bot`, because the arches have to line up with the
    * actual hard points and not with a guess.
    */
-  const wheelRows = chassis.wheelCount / 2;
-  const usableLength = chassis.length / 2 - wheel.radius - 0.03;
-  const wheelZ: number[] = [];
-  for (let row = 0; row < wheelRows; row++) {
-    wheelZ.push(
-      wheelRows === 1 ? 0 : -usableLength + (2 * usableLength * row) / (wheelRows - 1),
-    );
-  }
+  const wheelZ = driveLayout(chassis, wheel).rowZ;
   // The side panel's local X runs along chassis Z, and the ±90 degree turn about
   // Y reverses it — which does not matter here, because the arches are symmetric.
   const wheelArches: [number, number][] = wheelZ.map((z) => [z, wheel.radius + 0.012]);
@@ -1047,6 +1050,17 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
     const cluster = boltCluster(registry, boltGeom, hardwareMat, perimeter);
     if (cluster) panel.add(cluster);
 
+    /*
+     * Remember what this panel looked like before any damage.
+     *
+     * `syncVisual` re-derives roughness and colour from wear on every frame, and
+     * it did so from a hard-coded base — so the chosen finish was overwritten on
+     * frame one and every machine came out gloss, while the front wedge (which is
+     * not in this map) kept the finish and left one machine wearing two.
+     */
+    panel.userData.baseRoughness = paintMat.roughness;
+    panel.userData.baseColor = paintMat.color.clone();
+
     body.add(panel);
     armorPanels.set(def.face, panel);
   }
@@ -1096,7 +1110,15 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
     for (const sign of [-1, 1]) {
       const skirt = new THREE.Mesh(geom, machinedMat);
       // Bottom edge lands on the floor line: -(height/2 + groundClearance).
-      skirt.position.set(sign * (hw + plate + 0.006), -hh - chassis.groundClearance + skirtHeight / 2 - 0.006, 0);
+      // `chamferedPlate` bulges half a chamfer past its nominal height at each
+      // edge, so the extra term is the bulge, not a fudge — without it the strip
+      // hung about 10 mm through the floor its own comment says it lands on.
+      const bulge = Math.min(0.008 * 0.45, skirtHeight * 0.2);
+      skirt.position.set(
+        sign * (hw + plate + 0.006),
+        -hh - chassis.groundClearance + skirtHeight / 2 + bulge,
+        0,
+      );
       skirt.rotation.y = (sign * Math.PI) / 2;
       skirt.castShadow = true;
       body.add(skirt);

@@ -12,6 +12,7 @@ import * as THREE from 'three';
 import { clamp, damp, smoothstep } from '../core/mathx.ts';
 import { fxRng } from '../core/rng.ts';
 import { ARENA_HALF } from '../game/arena.ts';
+import { prefersReducedMotion } from '../core/motion.ts';
 
 export type CameraMode = 'broadcast' | 'chase' | 'orbit' | 'scripted' | 'knockout';
 
@@ -58,6 +59,9 @@ export class CameraDirector {
   setMode(mode: CameraMode): void {
     this.mode = mode;
     if (mode !== 'scripted') this.script = null;
+    // Do not keep hold of a machine we are no longer pointed at: the winner's
+    // orbit subject outlived the match that built it.
+    if (mode !== 'knockout') this.knockoutSubject = null;
   }
 
   getMode(): CameraMode {
@@ -136,7 +140,9 @@ export class CameraDirector {
     if (this.mode !== 'scripted') this.containWithinArena();
 
     // Shake is applied after framing so it never fights the smoothing.
-    const magnitude = shake * 0.16;
+    // Camera shake is the strongest motion in the game, and the strobe already
+    // honours this preference; it would be odd for the shake not to.
+    const magnitude = shake * (prefersReducedMotion() ? 0.03 : 0.16);
     if (magnitude > 0.0005) {
       this.shakeOffset.set(
         fxRng.spread(magnitude),

@@ -38,6 +38,16 @@ const sparkFragment = /* glsl */ `
     vec4 texel = texture2D(map, gl_PointCoord);
     if (texel.a < 0.01) discard;
     gl_FragColor = vec4(vColor, 1.0) * texel * vAlpha;
+
+    /*
+     * Sparks and smoke go through the same tone mapping and colour conversion as
+     * everything else in the scene. A raw ShaderMaterial gets neither for free,
+     * so on the low tier — where there is no bloom pass and therefore no
+     * OutputPass to do it downstream — the particles were the only thing in the
+     * picture rendering at the wrong brightness and in the wrong colour space.
+     */
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 

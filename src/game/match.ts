@@ -96,6 +96,8 @@ export class Match {
 
   private stage: Stage;
   private headless: boolean;
+  /** Set by `dispose`; every public entry point checks it. */
+  private disposed = false;
   private ai: BotAI;
   private startSequence: StartSequence;
   private state: MatchState = 'intro';
@@ -235,11 +237,13 @@ export class Match {
   }
 
   setPlayerInput(input: BotInput): void {
+    if (this.disposed) return;
     this.playerInput = input;
   }
 
   /** Let the player jump the show open. */
   skipIntro(): void {
+    if (this.disposed) return;
     if (this.state !== 'intro') return;
     this.startSequence.skip();
   }
@@ -249,6 +253,7 @@ export class Match {
   // -------------------------------------------------------------------------
 
   update(dt: number): void {
+    if (this.disposed) return;
     /*
      * Two clocks, deliberately.
      *
@@ -521,6 +526,14 @@ export class Match {
   // -------------------------------------------------------------------------
 
   dispose(): void {
+    if (this.disposed) return;
+    /*
+     * Everything below frees WASM allocations, and Rapier answers a call on a
+     * freed world with "null pointer passed to rust" rather than a JavaScript
+     * error — so one stray frame from a loop that had not been told to stop took
+     * the whole page down.
+     */
+    this.disposed = true;
     if (this.finishTimer !== null) {
       clearTimeout(this.finishTimer);
       this.finishTimer = null;
@@ -539,6 +552,8 @@ export class Match {
       this.stage.scene.remove(this.fx.group);
     }
 
+    // The camera holds whichever machine it was orbiting; let it go with the rest.
+    this.camera.setMode('broadcast');
     this.combat.dispose();
     this.fx.dispose();
     this.lights.dispose();

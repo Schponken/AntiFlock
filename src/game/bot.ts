@@ -22,7 +22,7 @@ import { buildBotVisual, wedgeDimensions, type BotVisual } from '../render/botMe
 import { BotDamage, type ArmorFace } from './damage.ts';
 import { computeStats, type BotDesign, type DerivedStats } from './design.ts';
 import { DRIVETRAIN_EFFICIENCY } from './design.ts';
-import { rotorInertiaTensor, type WeaponSpec } from './parts.ts';
+import { driveLayout, rotorInertiaTensor, type WeaponSpec } from './parts.ts';
 import { clamp, clamp01, damp } from '../core/mathx.ts';
 
 export interface BotInput {
@@ -326,19 +326,15 @@ export class Bot {
     this.vehicle.indexUpAxis = 1;
     this.vehicle.setIndexForwardAxis = 2;
 
-    const wheelLocalY = wheel.radius - chassisSpec.height / 2 - chassisSpec.groundClearance;
+    const { halfTrack, wheelLocalY, rowZ } = driveLayout(chassisSpec, wheel);
     const hardPointY = wheelLocalY + SUSPENSION_REST;
     this.hardPointY = hardPointY;
     // Springs sized for the corner load, not a magic number. See SUSPENSION_SAG.
     const suspensionStiffness = 9.81 / (chassisSpec.wheelCount * SUSPENSION_SAG);
-    const halfTrack = chassisSpec.width / 2 - wheel.width * 0.15;
-    const rows = chassisSpec.wheelCount / 2;
-    const usableLength = chassisSpec.length / 2 - wheel.radius - 0.03;
 
     for (let i = 0; i < chassisSpec.wheelCount; i++) {
       const side = i % 2 === 0 ? -1 : 1;
-      const row = Math.floor(i / 2);
-      const z = rows === 1 ? 0 : -usableLength + (2 * usableLength * row) / (rows - 1);
+      const z = rowZ[Math.floor(i / 2)]!;
       this.vehicle.addWheel(
         { x: side * halfTrack, y: hardPointY, z },
         { x: 0, y: -1, z: 0 },
@@ -1109,8 +1105,12 @@ export class Bot {
       if (!part || !panel.visible) continue;
       const material = panel.material as THREE.MeshPhysicalMaterial;
       const wear = clamp01(1 - part.hp / Math.max(1, part.maxHp));
-      material.roughness = clamp(0.18 + wear * 0.65, 0.05, 1);
-      material.color.setScalar(1 - wear * 0.45);
+      // Modulate from the finish the player chose, not from a fixed gloss.
+      const base = (panel.userData.baseRoughness as number | undefined) ?? 0.18;
+      material.roughness = clamp(base + wear * 0.65, 0.05, 1);
+      const baseColor = panel.userData.baseColor as THREE.Color | undefined;
+      if (baseColor) material.color.copy(baseColor).multiplyScalar(1 - wear * 0.45);
+      else material.color.setScalar(1 - wear * 0.45);
     }
   }
 

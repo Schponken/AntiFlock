@@ -19,6 +19,7 @@ import {
   WEAPONS,
   WEIGHT_LIMIT_KG,
   WHEELS,
+  driveLayout,
   weaponById,
   type AccessoryEffect,
   type DecalId,
@@ -190,14 +191,10 @@ export class Builder {
 
     // Wheels have no physics here, so place them from the same geometry the rig uses.
     const { chassis, wheel } = stats.parts;
-    const wheelLocalY = wheel.radius - chassis.height / 2 - chassis.groundClearance;
-    const halfTrack = chassis.width / 2 - wheel.width * 0.15;
-    const rows = chassis.wheelCount / 2;
-    const usableLength = chassis.length / 2 - wheel.radius - 0.03;
+    const { halfTrack, wheelLocalY, rowZ } = driveLayout(chassis, wheel);
     for (let i = 0; i < this.visual.wheels.length; i++) {
       const side = i % 2 === 0 ? -1 : 1;
-      const row = Math.floor(i / 2);
-      const z = rows === 1 ? 0 : -usableLength + (2 * usableLength * row) / (rows - 1);
+      const z = rowZ[Math.floor(i / 2)]!;
       // Wheels are children of `root`, so these are root-local coordinates. Adding
       // the root's own height here would lift the whole machine off the turntable.
       this.visual.wheels[i]!.position.set(side * halfTrack, wheelLocalY, z);
@@ -477,14 +474,35 @@ export class Builder {
   }
 
   private renderExtras(): void {
+    const weapon = weaponById(this.design.weaponId);
+    /*
+     * Say so when a part cannot do anything for this build.
+     *
+     * The Gyro Compensator cancels a rotor's gyroscopic reaction, and the Extended
+     * Battery feeds a rotor's motor and an actuator's charge — so on a fixed wedge
+     * both are pure weight, and on a flipper the compensator is. Offering them
+     * anyway is the same trap the rotor-material picker used to be.
+     */
+    const inert = (id: AccessoryEffect): string | null => {
+      if (id === 'antispin' && !weapon.rotor) {
+        return `Nothing to compensate: ${weapon.name.toLowerCase()} has no rotor.`;
+      }
+      if (id === 'bigbattery' && !weapon.rotor && !weapon.actuator && !weapon.clamp) {
+        return `Nothing to power: ${weapon.name.toLowerCase()} draws no current.`;
+      }
+      return null;
+    };
+
     for (const accessory of ACCESSORIES) {
       const active = this.design.accessories.includes(accessory.id);
+      const useless = inert(accessory.id);
       this.optionsPane.append(
         this.optionCard({
           title: accessory.name,
-          blurb: accessory.blurb,
+          blurb: useless ?? accessory.blurb,
           meta: `${accessory.mass} kg`,
           selected: active,
+          disabled: useless !== null && !active,
           onSelect: () => {
             this.toggleAccessory(accessory.id);
             this.renderOptions();

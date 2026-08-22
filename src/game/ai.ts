@@ -293,9 +293,12 @@ export class BotAI {
     const current = Math.atan2(forward.x, forward.z);
     let error = -wrapAngle(desired - current) + this.aimBias;
 
-    // Driving inverted means the controls are mirrored, and a real driver
-    // takes a moment to remember that.
-    if (this.bot.inverted && this.bot.stats.invertible) error = -error;
+    /*
+     * No mirror. The drivetrain does not mirror the steering when a frame runs
+     * upside-down — the two things that reverse cancel — so negating here made an
+     * inverted driver turn away from whatever it was aiming at, for as long as it
+     * stayed on its back.
+     */
     return error;
   }
 

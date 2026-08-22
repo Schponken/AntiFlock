@@ -50,7 +50,7 @@ export interface CombatEvents {
 }
 
 /** Minimum gap between two damaging hits on the same attacker/defender pair. */
-const HIT_COOLDOWN = 0.075;
+export const HIT_COOLDOWN = 0.075;
 
 /** Rammed contacts below this impulse are just shoving, not damage. */
 const RAM_IMPULSE_THRESHOLD = 260;

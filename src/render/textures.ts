@@ -466,20 +466,42 @@ export function makeBannerTexture(): THREE.Texture {
 
   const words = ['ANTIFLOCK', 'ROBOT COMBAT LEAGUE', 'HEAVYWEIGHT', 'FIGHT NIGHT'];
   ctx.textBaseline = 'middle';
-  let x = 0;
-  let i = 0;
-  while (x < w) {
+  ctx.font = `700 ${h * 0.42}px "Barlow Condensed", "Arial Narrow", sans-serif`;
+
+  /*
+   * Lay the run out first, then stretch it to fit exactly.
+   *
+   * Drawing until the cursor passed the edge wrote the last entry straight off
+   * the canvas, and the texture wraps — so the banner read a word bisected at the
+   * seam, over and over, all the way round the box. Measuring first and scaling
+   * the whole run means every entry is whole and the repeat is seamless.
+   */
+  const gap = 120;
+  const layout: { word: string; x: number; width: number }[] = [];
+  let cursor = 0;
+  for (let i = 0; cursor < w; i++) {
     const word = words[i % words.length]!;
-    ctx.font = `700 ${h * 0.42}px "Barlow Condensed", "Arial Narrow", sans-serif`;
-    const textWidth = ctx.measureText(word).width;
+    const width = ctx.measureText(word).width;
+    layout.push({ word, x: cursor, width });
+    cursor += width + gap;
+  }
+  // Drop the entry that spilled over, then stretch what is left across the full
+  // width so the join lands between words rather than through one.
+  if (layout.length > 1) {
+    layout.pop();
+    cursor = layout[layout.length - 1]!.x + layout[layout.length - 1]!.width + gap;
+  }
+
+  ctx.save();
+  ctx.scale(w / Math.max(1, cursor), 1);
+  layout.forEach((entry, i) => {
     ctx.fillStyle = i % 2 === 0 ? '#e8eaf0' : '#ff3b30';
-    ctx.fillText(word, x + 40, h / 2);
+    ctx.fillText(entry.word, entry.x + 40, h / 2);
     // Divider chevron between entries.
     ctx.fillStyle = '#2a2f38';
-    ctx.fillRect(x + textWidth + 70, h * 0.2, 6, h * 0.6);
-    x += textWidth + 120;
-    i++;
-  }
+    ctx.fillRect(entry.x + entry.width + 70, h * 0.2, 6, h * 0.6);
+  });
+  ctx.restore();
   const texture = toTexture(canvas, { repeat: 1, srgb: true });
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;

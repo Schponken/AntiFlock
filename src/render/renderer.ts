@@ -15,8 +15,11 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { clamp, damp } from '../core/mathx.ts';
 
-/** Frames longer than this are stalls, and are kept out of the frame-time average. */
+/** A frame longer than this contributes as if it were exactly this long. */
 const HITCH_SECONDS = 0.2;
+
+/** ...and contributes at most this many milliseconds to the average. */
+const HITCH_CEILING_MS = 250;
 
 /** Time constant of the frame-time average, in seconds. */
 const FRAME_AVERAGE_SECONDS = 1;
@@ -61,6 +64,13 @@ export class Stage {
 
     this.renderer = new THREE.WebGLRenderer({
       canvas: options.canvas,
+      /*
+       * This only antialiases the *default* framebuffer, which is what the low
+       * tier draws to — it has no bloom, so no composer. The tiers above it send
+       * every pixel through the composer instead and get their AA from its
+       * multisampled target; see `buildComposer`. Context flags cannot be changed
+       * after construction, so this is fixed at the tier the machine started on.
+       */
       antialias: this.quality !== 'low',
       powerPreference: 'high-performance',
       stencil: false,
@@ -184,7 +194,23 @@ export class Stage {
     if (!getRenderProfile().bloom) return;
 
     const size = this.renderer.getSize(new THREE.Vector2());
-    this.composer = new EffectComposer(this.renderer);
+    /*
+     * A multisampled target, or the antialiasing the context was asked for does
+     * nothing at all.
+     *
+     * `WebGLRenderer({ antialias: true })` only antialiases the *default*
+     * framebuffer, and on the high and medium tiers every pixel goes through the
+     * composer instead — whose own targets default to `samples: 0`. So the two
+     * tiers that ask for AA were the two tiers that never got it, and the low tier,
+     * which renders straight to the canvas, was the only one that did.
+     */
+    const pixelRatio = this.pixelRatio();
+    const target = new THREE.WebGLRenderTarget(
+      Math.max(1, Math.round(size.x * pixelRatio)),
+      Math.max(1, Math.round(size.y * pixelRatio)),
+      { type: THREE.HalfFloatType, samples: this.quality === 'high' ? 4 : 2 },
+    );
+    this.composer = new EffectComposer(this.renderer, target);
     this.composer.setPixelRatio(this.pixelRatio());
     this.composer.setSize(size.x, size.y);
 
@@ -303,11 +329,18 @@ export class Stage {
    * than a slightly soft image.
    */
   private adapt(dt: number): void {
-    // A frame this long is a stall. It says nothing about how fast we can render.
-    if (dt < HITCH_SECONDS) {
-      const k = 1 - Math.exp(-dt / FRAME_AVERAGE_SECONDS);
-      this.frameMs += (dt * 1000 - this.frameMs) * k;
-    }
+    /*
+     * Clamp an outlier rather than discarding it.
+     *
+     * Discarding every frame over a fixed 0.2 s wall protected against alt-tab and
+     * garbage-collection stalls, but it also meant the entire 2-5 fps band was
+     * treated as a series of stalls — so a machine that was genuinely rendering at
+     * three frames a second never moved the average and never dropped a tier,
+     * which is precisely the machine the adaptive path exists for. Clamping keeps
+     * the outlier protection and still lets sustained slowness register.
+     */
+    const k = 1 - Math.exp(-Math.min(dt, HITCH_SECONDS) / FRAME_AVERAGE_SECONDS);
+    this.frameMs += (Math.min(dt * 1000, HITCH_CEILING_MS) - this.frameMs) * k;
     this.sinceAdapt += dt;
     if (this.sinceAdapt < 4) return;
     this.sinceAdapt = 0;

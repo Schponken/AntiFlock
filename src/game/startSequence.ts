@@ -122,7 +122,9 @@ export class StartSequence {
 
       // --- Red corner -----------------------------------------------------
       .add(5.4, 'red-intro', () => {
-        lights.pulseWash(1);
+        // One corner at a time: flaring both washes threw away the only cue that
+        // tells the red corner apart from the blue.
+        lights.pulseWashFor(0, 1);
         this.events.emit('card', {
           text: red.name.toUpperCase(),
           sub: `RED SQUARE · ${Math.round(kgToLb(red.stats.totalMass))} LB · ${red.stats.parts.weapon.name.toUpperCase()}`,
@@ -137,7 +139,7 @@ export class StartSequence {
 
       // --- Blue corner ----------------------------------------------------
       .add(10.2, 'blue-intro', () => {
-        lights.pulseWash(1);
+        lights.pulseWashFor(1, 1);
         this.events.emit('card', {
           text: blue.name.toUpperCase(),
           sub: `BLUE SQUARE · ${Math.round(kgToLb(blue.stats.totalMass))} LB · ${blue.stats.parts.weapon.name.toUpperCase()}`,

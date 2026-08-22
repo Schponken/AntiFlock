@@ -680,6 +680,8 @@ const uiRoot = document.getElementById('ui-root');
 if (canvas && uiRoot) {
   const fail = (error: unknown): void => {
     console.error('AntiFlock failed to start', error);
+    // Replace the loading screen rather than stacking the error under it.
+    uiRoot.replaceChildren();
     uiRoot.append(
       el(
         'section',
