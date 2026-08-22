@@ -397,7 +397,21 @@ export class Arena {
       // 0.45 m the pivot was so close to the wall that a 0.8 m frame parked under
       // it was already touching the polycarbonate and got shoved out of the way
       // before the arm could come down.
-      const pivot = new THREE.Vector3(0, 1.35, sz * (ARENA_HALF - 1.1));
+      /*
+       * Off the centreline, because the start squares are on it.
+       *
+       * Moving the pivots inboard so a machine could fit under the head also put
+       * the parked arm directly over `START_SQUARES`: a bot released under it
+       * spawned on top of the arm and settled a metre in the air, wheels reporting
+       * contact, going nowhere. Offsetting in x keeps the swing over open floor
+       * and puts these where a real arena has them — off to one side, one at each
+       * end.
+       */
+      const pivot = new THREE.Vector3(
+        sz * (ARENA_HALF - 1.1) * 0.55,
+        1.35,
+        sz * (ARENA_HALF - 1.1),
+      );
       const restAngle = sz * PULVERIZER_RAISED;
       /*
        * Built already parked. A kinematic body keeps whatever rotation it was

@@ -238,7 +238,22 @@ export class Bot {
       const wedgeDesc = RAPIER.ColliderDesc.convexHull(wedgeHullPoints(chassisSpec))!;
       if (wedgeDesc) {
         wedgeDesc
-          .setTranslation(0, -chassisSpec.height / 2, chassisSpec.length / 2 - 0.01)
+          /*
+           * Lifted clear of the wheel contact line at rest.
+           *
+           * A wedge is a third rigid contact point *ahead* of the front wheels, so
+           * sitting it flush with the chassis floor levered the machine's weight
+           * off its tyres: measured, Doorstop's wheels carried 0% of its weight
+           * and Trebuchet's 37%, which left both with no traction to drive or turn
+           * with. Set so the lip skims a few millimetres above the floor and only
+           * bites when the machine pitches into it or rides up on something —
+           * which is when a wedge is supposed to be doing its work.
+           */
+          .setTranslation(
+            0,
+            -chassisSpec.height / 2 + chassisSpec.groundClearance * 0.8,
+            chassisSpec.length / 2 - 0.01,
+          )
           .setMass(WEDGE_COLLIDER_MASS)
           // Ground-scraping forks are polished titanium sliding on steel. They have
           // to be genuinely slippery: give them tyre-like grip and the machine
@@ -518,7 +533,21 @@ export class Bot {
     this.updateInversion();
     this.updateDrive();
     this.updateWeapon(dt);
-    this.vehicle.updateVehicle(dt);
+    /*
+     * The suspension rays must not be able to see this machine's own weapon.
+     *
+     * They are cast straight down from the hard points, and a horizontal rotor
+     * spans wider than the wheel track — so as soon as the bar sits at or below
+     * the hard point, every wheel starts measuring the ground at the *top of its
+     * own blade*. The suspension then reads fully compressed, pushes back at four
+     * times the machine's weight, and the whole thing levitates: measured, a
+     * discshell climbed steadily to ten metres with both wheels reporting contact.
+     * Filtering the ray is the fix; the collision groups already keep the rotor
+     * and the frame apart, but a query filter is a separate thing.
+     */
+    this.vehicle.updateVehicle(dt, undefined, undefined, (collider) =>
+      collider.parent()?.handle !== this.weaponBody?.handle,
+    );
     this.applyGyroCompensation(dt);
 
     if (this.srimechCooldown > 0) this.srimechCooldown -= dt;
@@ -691,6 +720,33 @@ export class Bot {
     const rightSideDrive = clamp(throttle - steer, -1, 1);
     const braking = Math.abs(throttle) < 0.02 && Math.abs(steer) < 0.02;
 
+    /*
+     * Cap the command at the friction circle, rather than trusting the solver to.
+     *
+     * Rapier's raycast vehicle is the Bullet `btRaycastVehicle` port, and that
+     * weights the forward impulse by 0.5 in its own friction check — so the
+     * effective longitudinal mu comes out at about twice `frictionSlip`, and a
+     * 250 lb machine launched at up to 2.8 g. The builder panel quotes
+     * `min(driveForce, tractionLimit) / mass`, i.e. mu*g, so the number on the
+     * panel was half what the machine actually did.
+     *
+     * The budget is the machine's, not the corner's: a tyre can pass mu times the
+     * load on it, and load transfer moves that load between wheels without
+     * changing the total, which is `mu * m * g` for as long as the machine is on
+     * the ground. Sharing that across the wheels actually touching is both what
+     * `tractionLimit` in `computeStats` means and the only formulation that
+     * survives the two cases a per-corner reading gets wrong: a settled machine,
+     * whose reported suspension force is zero because the body is asleep, and a
+     * frame pitched onto two wheels, which would otherwise lose the grip its other
+     * two are still entitled to as they come back down.
+     */
+    let wheelsDown = 0;
+    for (let i = 0; i < this.wheelDead.length; i++) {
+      if (!this.wheelDead[i] && this.vehicle.wheelIsInContact(i)) wheelsDown += 1;
+    }
+    const tractionPerWheel =
+      (wheel.grip * this.stats.totalMass * 9.81) / Math.max(1, wheelsDown);
+
     for (let i = 0; i < this.wheelDead.length; i++) {
       if (this.wheelDead[i]) {
         this.vehicle.setWheelEngineForce(i, 0);
@@ -713,7 +769,10 @@ export class Bot {
       }
       const ratio = demand === 0 ? 0 : clamp((wheelSpeed * Math.sign(demand)) / freeSpeed, -1, 1);
       const availableForce = perWheelForce * clamp(1 - ratio, 0, 1.35);
-      this.vehicle.setWheelEngineForce(i, demand * availableForce * mobility);
+
+      // See `tractionPerWheel` above.
+      const commanded = Math.min(availableForce * mobility, tractionPerWheel);
+      this.vehicle.setWheelEngineForce(i, demand * commanded);
       this.vehicle.setWheelBrake(i, braking ? this.stats.totalMass * 1.4 : 0);
     }
 

@@ -396,7 +396,11 @@ export class Combat {
       // by driving its opponent into the wall has to be credited for it. Only
       // weapon strikes were being counted, which handed every ramming build a 0 in
       // the damage column of a decision it had comfortably earned.
-      aggressor.bot.damageDealt += result.damage;
+      // Panel *and* the shock it drove into the frame, exactly as the weapon path
+      // does. Crediting only the panel's share left the ram column skewed by the
+      // defender's armour: measured, an aggressor facing plastic was credited 9%
+      // of what it actually did against 69% facing tool steel.
+      aggressor.bot.damageDealt += result.damage + result.shockConsumed;
       if (result.damage > 1) {
         this.events.emit('impact', {
           position: point,

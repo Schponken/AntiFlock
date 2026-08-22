@@ -301,7 +301,19 @@ export const CHASSIS: readonly ChassisSpec[] = [
     armorArea: 0.5,
     groundClearance: 0.02,
     wheelCount: 2,
-    weaponMount: { x: 0, y: 0.16, z: 0 },
+    /*
+     * The bar sweeps *under* the shell, not over it.
+     *
+     * At y = 0.16 the rotor centreline sat 0.31 m off the floor, and a bar is only
+     * 30 mm thick — so the blade occupied a band from 0.295 to 0.325 m while the
+     * hulls it has to reach top out between 0.202 and 0.400 m. Three of the six
+     * chassis in the catalogue were entirely below it, and the only frame that
+     * mounts these two weapons could never touch them. Dropped so the blade runs
+     * at about 120 mm, which is inside the band every hull in the catalogue
+     * occupies, and high enough that a metre-wide blade does not ground out the
+     * first time the machine pitches under power — which is, after all, what an undercutter is.
+     */
+    weaponMount: { x: 0, y: -0.03, z: 0 },
     accepts: ['horizontal-spinner', 'undercutter', 'wedge'],
     invertible: true,
     frameIntegrity: 52000,

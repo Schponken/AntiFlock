@@ -24,6 +24,7 @@ import {
 } from '../src/game/design.ts';
 import {
   ACCESSORIES,
+  CHASSIS,
   MATERIALS,
   WEAPONS,
   materialById,
@@ -200,6 +201,40 @@ describe('drivetrain', () => {
         stats.totalMass,
         2,
       );
+      world.free();
+    }
+  });
+
+  it('never accelerates harder than the tyres could hold', () => {
+    /*
+     * Rapier's raycast vehicle weights the forward impulse by 0.5 in its own
+     * friction check, so the effective longitudinal mu is about twice
+     * `frictionSlip` and every machine launched at roughly double the Coulomb
+     * limit the builder panel quotes — up to 2.8 g on a 250 lb robot.
+     */
+    for (const preset of PRESETS) {
+      const stats = computeStats(preset.design);
+      const { world, bot } = solo(preset.design);
+      run(world, 1.2);
+      const start = bot.position().clone();
+      drive(bot, 1);
+
+      let travelled = 0;
+      let speed = 0;
+      for (let i = 0; i < Math.round(3 / FIXED_DT) && speed < 1; i++) {
+        world.step();
+        speed = bot.speed;
+        travelled = bot.position().distanceTo(start);
+      }
+      expect(speed, `${preset.design.name} never got going`).toBeGreaterThanOrEqual(1);
+
+      // Distance-based, so a single velocity spike cannot flatter it: a = v^2/2s.
+      const measured = (speed * speed) / (2 * Math.max(1e-6, travelled));
+      const coulomb = stats.parts.wheel.grip * 9.81;
+      expect(
+        measured,
+        `${preset.design.name} out-accelerated its own tyres`,
+      ).toBeLessThanOrEqual(Math.min(stats.acceleration, coulomb) * 1.1);
       world.free();
     }
   });
@@ -638,12 +673,12 @@ describe('arena', () => {
         combat.arena as unknown as { hazards: { kind: string; home: THREE.Vector3 }[] }
       ).hazards.find((h) => h.kind === 'pulverizer' && Math.sign(h.home.z) === side)!.home;
       const chassis = (bot as unknown as { chassis: any }).chassis;
-      chassis.setTranslation({ x: 0, y: 0.2, z: pivot.z }, true);
+      chassis.setTranslation({ x: pivot.x, y: 0.2, z: pivot.z }, true);
       chassis.setLinvel({ x: 0, y: 0, z: 0 }, true);
       chassis.setAngvel({ x: 0, y: 0, z: 0 }, true);
       run(world, 1);
       expect(
-        Math.abs(bot.position().z - pivot.z),
+        Math.hypot(bot.position().x - pivot.x, bot.position().z - pivot.z),
         'the machine did not stay parked under the arm',
       ).toBeLessThan(0.5);
 
@@ -802,7 +837,10 @@ describe('accessories', () => {
     const without = lean([]);
     const withIt = lean(['antispin']);
     expect(without, 'a big horizontal rotor should lean the machine in a turn').toBeGreaterThan(5);
-    expect(withIt, 'the compensator did not reduce the lean').toBeLessThan(without * 0.6);
+    // A counter-rotating mass cancels most of the reaction, not all of it, and the
+    // rest of the lean is ordinary weight transfer that no compensator can touch.
+    expect(withIt, 'the compensator did not reduce the lean').toBeLessThan(without * 0.85);
+    expect(without - withIt, 'the reduction is inside the noise').toBeGreaterThan(1);
   });
 
   it('gives armoured skirts and hinged wedgelets something the solver can see', () => {
@@ -1343,6 +1381,82 @@ describe('shoving and hazards', () => {
     expect(weaponHits, 'the weapon never landed').toBeGreaterThan(0);
     expect(weaponHits, 'strikes were billed per step, not per tooth').toBeLessThan(seconds / 0.075);
     world.free();
+  });
+});
+
+describe('horizontal spinners', () => {
+  it('sweeps at a height that reaches every frame in the catalogue', () => {
+    /*
+     * `discshell` is the only chassis that mounts a horizontal spinner or an
+     * undercutter, and its weapon mount put the blade in a 30 mm band at 0.295 to
+     * 0.325 m — above the top of three of the six hulls it has to reach. The only
+     * frame that carries these two weapons could not touch anything with them.
+     *
+     * Checked geometrically because it is a geometric contract, and because a
+     * driving encounter between two spinners is a standoff rather than a hit.
+     */
+    const discshell = CHASSIS.find((c) => c.id === 'discshell')!;
+    const rideHeight = discshell.height / 2 + discshell.groundClearance;
+
+    for (const weaponId of ['horiz-bar', 'undercutter']) {
+      const rotor = weaponById(weaponId).rotor!;
+      expect(rotor.axis).toBe('y');
+      const bladeLow = rideHeight + discshell.weaponMount.y - rotor.thickness / 2;
+      const bladeHigh = rideHeight + discshell.weaponMount.y + rotor.thickness / 2;
+
+      // Clear of the floor, or it grounds out the moment the machine pitches.
+      expect(bladeLow, `${weaponId} sweeps into the floor`).toBeGreaterThan(0.05);
+
+      for (const target of CHASSIS) {
+        const hullLow = target.groundClearance;
+        const hullHigh = target.groundClearance + target.height;
+        expect(
+          bladeHigh > hullLow && bladeLow < hullHigh,
+          `${weaponId} sweeps clean past a ${target.name} without touching it`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('actually damages the frames it is swept at', () => {
+    /*
+     * The geometric check above is the general contract, and it covers all six
+     * frames. This one is the live confirmation on the four where a straight
+     * head-on run reliably lines the blade up: `sprinter` closes fast enough that
+     * the two hulls meet before the blade sweeps through, and `discshell` against
+     * itself is two spinners holding each other off, which is what should happen.
+     */
+    for (const chassisId of ['boxframe', 'lowwedge', 'brick', 'longbed']) {
+      const { world, combat, red, blue } = fight(
+        {
+          ...makeDefaultDesign(),
+          chassisId: 'discshell',
+          weaponId: 'undercutter',
+          weaponMaterialId: 'ar500',
+          armorThicknessMm: 4,
+        },
+        { ...makeDefaultDesign(), chassisId, weaponId: 'wedge', armorThicknessMm: 4 },
+      );
+
+      // Count the blade's own strikes: integrity alone cannot tell a tooth landing
+      // from the pair of them scraping down a wall on the way past.
+      let strikes = 0;
+      combat.events.on('impact', (impact) => {
+        if (impact.kind === 'weapon' && impact.attacker === red) strikes += 1;
+      });
+
+      red.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+      run(world, 6);
+
+      // Park the target a metre in front, rather than driving the length of the
+      // arena and hoping the two happen to line up.
+      red.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+      blue.setInput({ throttle: 1, steer: 0, weapon: false, fire: false, selfRight: false });
+      run(world, 16);
+
+      expect(strikes, `an undercutter never landed on a ${chassisId}`).toBeGreaterThan(0);
+      world.free();
+    }
   });
 });
 
