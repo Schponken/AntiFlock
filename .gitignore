@@ -8,3 +8,6 @@ blob-report/
 .DS_Store
 .vite/
 coverage/
+
+# Throwaway probe suites written while auditing the physics by hand.
+tests/tmpverify_*.test.ts
