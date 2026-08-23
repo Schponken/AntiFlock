@@ -1,0 +1,14 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+*.local
+.DS_Store
+.vite/
+coverage/
+
+# Throwaway probe suites written while auditing the physics by hand.
+tmpverify_*
+**/tmpverify_*
