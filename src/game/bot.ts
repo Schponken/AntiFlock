@@ -257,7 +257,8 @@ export class Bot {
 
     // A front wedge is a real, load-bearing part of the machine.
     if (hasWedge) {
-      const wedgeDesc = RAPIER.ColliderDesc.convexHull(wedgeHullPoints(chassisSpec))!;
+      const forks = this.stats.parts.accessories.includes('forks');
+      const wedgeDesc = RAPIER.ColliderDesc.convexHull(wedgeHullPoints(chassisSpec, forks))!;
       if (wedgeDesc) {
         wedgeDesc
           /*
@@ -273,14 +274,23 @@ export class Bot {
            */
           .setTranslation(
             0,
+            // Forks scrape: their tips ride closer to the floor than a plough
+            // face does, which is the other half of what the 3.1 kg buys.
             -chassisSpec.height / 2 + chassisSpec.groundClearance * 0.8,
             chassisSpec.length / 2 - 0.01,
           )
           .setMass(WEDGE_COLLIDER_MASS)
-          // Ground-scraping forks are polished titanium sliding on steel. They have
-          // to be genuinely slippery: give them tyre-like grip and the machine
-          // anchors itself on its own wedge and can barely turn.
-          .setFriction(0.08)
+          /*
+           * Forks are polished titanium; a plough face is not.
+           *
+           * Both used to be set to 0.08, which is a titanium number, so the one
+           * property that distinguishes the two — a fork slides in under an
+           * opponent while a solid face scrubs against them — was handed to
+           * machines that had not paid the 3.1 kg for it. They still cannot be
+           * given tyre-like grip: at that the machine anchors itself on its own
+           * wedge and can barely turn.
+           */
+          .setFriction(forks ? 0.06 : 0.24)
           .setRestitution(0.15)
           .setCollisionGroups(groups)
           .setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
@@ -1189,8 +1199,11 @@ function quatFromYaw(yaw: number): { x: number; y: number; z: number; w: number 
  * An earlier version of this ran the ramp along -Z, which put the collider inside
  * the chassis pointing backwards while the mesh pointed forwards.
  */
-function wedgeHullPoints(chassis: { width: number; height: number }): Float32Array {
-  const { hw, rise, depth } = wedgeDimensions(chassis);
+function wedgeHullPoints(
+  chassis: { width: number; height: number },
+  forks: boolean,
+): Float32Array {
+  const { hw, rise, depth } = wedgeDimensions(chassis, forks);
   return new Float32Array([
     -hw, 0, depth,
     hw, 0, depth,

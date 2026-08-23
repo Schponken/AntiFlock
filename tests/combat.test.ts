@@ -7,6 +7,7 @@ import { makeDefaultDesign, presetById, computeStats, cloneDesign } from '../src
 import { materialById } from '../src/game/parts.ts';
 import {
   BotDamage,
+  NOMINAL_PLATE_MM,
   resolveHit,
   scoreJudges,
   transferFraction,
@@ -91,6 +92,7 @@ describe('resolveHit', () => {
       bite: 1,
       squareness: 1,
       targetMaterial: materialById('hardox'),
+      plateThicknessMm: NOMINAL_PLATE_MM,
       part: target,
     });
     expect(result.damage).toBeGreaterThan(0);
@@ -105,6 +107,7 @@ describe('resolveHit', () => {
       bite: 1.5,
       squareness: 1,
       targetMaterial: materialById('cfrp'),
+      plateThicknessMm: NOMINAL_PLATE_MM,
       part: target,
     });
     expect(first.destroyed).toBe(true);
@@ -115,6 +118,7 @@ describe('resolveHit', () => {
       bite: 1.5,
       squareness: 1,
       targetMaterial: materialById('cfrp'),
+      plateThicknessMm: NOMINAL_PLATE_MM,
       part: target,
     });
     expect(second.destroyed, 'a part must not be destroyed twice').toBe(false);
@@ -127,6 +131,7 @@ describe('resolveHit', () => {
       bite: 1,
       squareness: 1,
       targetMaterial: materialById('hardox'),
+      plateThicknessMm: NOMINAL_PLATE_MM,
       part: part(50_000),
     });
     const heavy = resolveHit({
@@ -134,6 +139,7 @@ describe('resolveHit', () => {
       bite: 1,
       squareness: 1,
       targetMaterial: materialById('hardox'),
+      plateThicknessMm: NOMINAL_PLATE_MM,
       part: part(50_000),
     });
     expect(heavy.severity).toBeGreaterThan(light.severity);

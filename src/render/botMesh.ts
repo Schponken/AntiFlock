@@ -643,15 +643,32 @@ function buildArm(
 // ---------------------------------------------------------------------------
 
 /** Dimensions of the front wedge, shared by its mesh and its collider. */
-export function wedgeDimensions(chassis: { width: number; height: number }): {
+/** How far a hinged wedgelet leans down at the front, radians — matches the collider. */
+const RAMP_TILT_VISUAL = 0.28;
+
+/**
+ * `forks` is not cosmetic.
+ *
+ * Ground-Scraping Forks and a Fixed Wedge both resolved to the same single hull,
+ * so bolting 3.1 kg of forks onto a wedge bot — which the Doorstop preset does —
+ * changed precisely nothing about the machine that gets simulated. What forks
+ * actually buy over a plough face is reach and angle: titanium tines run 100 mm
+ * further forward and meet the floor shallower, so they get under an opponent
+ * that a steeper wedge just shoves. That is a longer, lower ramp, and it is the
+ * same number for the mesh and the collider.
+ */
+export function wedgeDimensions(
+  chassis: { width: number; height: number },
+  forks = false,
+): {
   hw: number;
   rise: number;
   depth: number;
 } {
   return {
     hw: chassis.width * 0.48,
-    rise: chassis.height * 0.55,
-    depth: 0.24,
+    rise: chassis.height * (forks ? 0.44 : 0.55),
+    depth: forks ? 0.27 : 0.24,
   };
 }
 
@@ -713,7 +730,7 @@ function buildWedge(
   boltMaterial: THREE.Material,
   style: 'solid' | 'forks',
 ): THREE.Group {
-  const { hw, rise, depth } = wedgeDimensions(stats.parts.chassis);
+  const { hw, rise, depth } = wedgeDimensions(stats.parts.chassis, style === 'forks');
   const group = new THREE.Group();
 
   const spans: [number, number][] =
@@ -808,7 +825,10 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
    * structure ran straight through the inner face of every tyre. This is the
    * furthest out any of them may go: the wheel's inner face, less a little.
    */
-  const wheelInner = driveLayout(chassis, wheel).halfTrack - wheel.width / 2 - 0.004;
+  const wheelTrack = driveLayout(chassis, wheel).halfTrack;
+  const wheelInner = wheelTrack - wheel.width / 2 - 0.004;
+  /** Outer face of the tyres — anything bolted to the flank has to clear it. */
+  const wheelOuter = wheelTrack + wheel.width / 2;
   const frameHalfWidth = Math.min(hw, wheelInner);
   const postGeom = registry.geometry(
     new THREE.BoxGeometry(railThickness, chassis.height * 0.92, railThickness),
@@ -1068,27 +1088,50 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
   // --- Wedge, wedgelets, skirts -----------------------------------------
   if (weapon.kind === 'wedge' || stats.parts.accessories.includes('forks')) {
     const isWeaponWedge = weapon.kind === 'wedge';
+    /*
+     * Forks win the look as well as the geometry. A wedge bot that has bolted
+     * tines to its plough face shows tines, and — more to the point — the mesh has
+     * to be built from the same `forks` flag as the collider in `bot.ts`, or the
+     * longer, shallower ramp the machine is actually simulated with is not the
+     * ramp the player can see.
+     */
+    const hasForks = stats.parts.accessories.includes('forks');
     const wedge = buildWedge(
       registry,
       stats,
       isWeaponWedge ? paintMat : frameMat,
       hardwareMat,
-      isWeaponWedge ? 'solid' : 'forks',
+      hasForks ? 'forks' : 'solid',
     );
     wedge.position.set(0, -hh, hl - 0.01);
     body.add(wedge);
   }
 
   if (stats.parts.accessories.includes('wedgelets')) {
+    /*
+     * Ahead of the main wedge, not inside it.
+     *
+     * The pair sat at `hl + 0.07` while the wedge occupies `hl - 0.01` to
+     * `hl - 0.01 + depth` and rises to 55% of the frame height — so on any machine
+     * with a wedge or forks they were built entirely within its envelope and never
+     * seen. These are the little hinged ramps that lead the main wedge in, so they
+     * belong at its lip, outboard of it, and lower.
+     */
+    const wedgeDepth = wedgeDimensions(chassis).depth;
+    const lip = hl - 0.01 + wedgeDepth;
     const geom = chamferedPlate(registry, {
       width: chassis.width * 0.26,
-      height: 0.14,
+      height: 0.1,
       thickness: 0.012,
     });
     for (const sign of [-1, 1]) {
       const wedgelet = new THREE.Mesh(geom, machinedMat);
-      wedgelet.position.set(sign * chassis.width * 0.3, -hh + 0.006, hl + 0.07);
-      wedgelet.rotation.set(-Math.PI / 2 - 0.09, 0, 0);
+      wedgelet.position.set(
+        sign * (chassis.width * 0.5 - chassis.width * 0.13),
+        -hh - chassis.groundClearance + 0.02,
+        lip + 0.04,
+      );
+      wedgelet.rotation.set(-Math.PI / 2 - RAMP_TILT_VISUAL, 0, 0);
       wedgelet.castShadow = true;
       body.add(wedgelet);
     }
@@ -1115,7 +1158,12 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       // hung about 10 mm through the floor its own comment says it lands on.
       const bulge = Math.min(0.008 * 0.45, skirtHeight * 0.2);
       skirt.position.set(
-        sign * (hw + plate + 0.006),
+        /*
+         * Outboard of the wheels, not through them. Sitting the strip on the
+         * armour line put it inside every tyre in the catalogue, because the
+         * wheels stand proud of the hull.
+         */
+        sign * Math.max(hw + plate + 0.006, wheelOuter + 0.008),
         -hh - chassis.groundClearance + skirtHeight / 2 + bulge,
         0,
       );
@@ -1271,10 +1319,19 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
         body.add(block);
       }
 
-      // The shaft the rotor is keyed to, running out through both bearings.
+      /*
+       * One value decides where the drive lives.
+       *
+       * The belt plane was `max(standoff + 0.05, hw + plate + 0.03)` and the shaft
+       * was `standoff * 2 + 0.06` long — and the second term of that max always
+       * won, so the pulley was parked 40 mm past the end of the shaft it is keyed
+       * to and 11 mm off the armour, driving nothing. Deriving both from the same
+       * number is the only way they can agree.
+       */
+      const beltX = Math.max(standoff + 0.05, hw + plate + 0.03);
       const shaft = new THREE.Mesh(
         registry.geometry(
-          new THREE.CylinderGeometry(0.016, 0.016, standoff * 2 + 0.06, 14),
+          new THREE.CylinderGeometry(0.016, 0.016, (beltX + 0.02) * 2, 14),
         ),
         machinedMat,
       );
@@ -1288,9 +1345,8 @@ export function buildBotVisual(design: BotDesign, stats: DerivedStats, team: 0 |
       const beltSpan = 0.24;
 
       const beltGroup = new THREE.Group();
-      // Outboard of the side plate, not through it: the drive used to straddle the
-      // armour, with the belt and motor pulley half inside the panel.
-      beltGroup.position.set(Math.max(standoff + 0.05, hw + plate + 0.03), mount.y, mount.z);
+      // Outboard of the side plate, on the end of the shaft it drives.
+      beltGroup.position.set(beltX, mount.y, mount.z);
       // Turn the band so it is extruded along the rotor's spin axis.
       beltGroup.rotation.y = Math.PI / 2;
 

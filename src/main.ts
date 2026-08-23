@@ -24,6 +24,7 @@ import {
   saveDesign,
   type BotDesign,
 } from './game/design.ts';
+import type { JudgeCard } from './game/damage.ts';
 import type { Difficulty } from './game/ai.ts';
 import { audio } from './audio/audio.ts';
 import { announcer } from './audio/announcer.ts';
@@ -507,6 +508,47 @@ class App {
     this.setScreen('fight');
   }
 
+  /**
+   * The judges' card as a table. Shared by the decision and the draw branches —
+   * the draw used to print a headline with no numbers under it.
+   */
+  private scorecard(card: JudgeCard): HTMLElement {
+    const rows: [string, number, number][] = [
+      ['Damage', card.damage[0], card.damage[1]],
+      ['Aggression', card.aggression[0], card.aggression[1]],
+      ['Control', card.control[0], card.control[1]],
+      ['Total', card.total[0], card.total[1]],
+    ];
+    return el(
+      'table',
+      { class: 'scorecard' },
+      el(
+        'thead',
+        {},
+        el(
+          'tr',
+          {},
+          el('th', { text: '' }),
+          el('th', { text: this.match!.player.design.name }),
+          el('th', { text: this.match!.opponent.design.name }),
+        ),
+      ),
+      el(
+        'tbody',
+        {},
+        ...rows.map(([label, a, b]) =>
+          el(
+            'tr',
+            { class: label === 'Total' ? 'is-total' : '' },
+            el('td', { text: label }),
+            el('td', { text: a.toFixed(1) }),
+            el('td', { text: b.toFixed(1) }),
+          ),
+        ),
+      ),
+    );
+  }
+
   private renderResults(): void {
     const outcome = this.match?.result;
     this.hud.detach();
@@ -518,6 +560,7 @@ class App {
         el('span', { class: 'eyebrow', text: 'Judges’ decision' }),
         el('h2', { class: 'results__winner', text: 'Draw' }),
         el('p', { class: 'muted', text: 'Nothing on the cards separated them.' }),
+        this.scorecard(outcome.card),
       );
     } else if (outcome) {
       body.push(
@@ -532,44 +575,7 @@ class App {
         }),
       );
 
-      if (outcome.kind === 'decision') {
-        const rows: [string, number, number][] = [
-          ['Damage', outcome.card.damage[0], outcome.card.damage[1]],
-          ['Aggression', outcome.card.aggression[0], outcome.card.aggression[1]],
-          ['Control', outcome.card.control[0], outcome.card.control[1]],
-          ['Total', outcome.card.total[0], outcome.card.total[1]],
-        ];
-        body.push(
-          el(
-            'table',
-            { class: 'scorecard' },
-            el(
-              'thead',
-              {},
-              el(
-                'tr',
-                {},
-                el('th', { text: '' }),
-                el('th', { text: this.match!.player.design.name }),
-                el('th', { text: this.match!.opponent.design.name }),
-              ),
-            ),
-            el(
-              'tbody',
-              {},
-              ...rows.map(([label, a, b]) =>
-                el(
-                  'tr',
-                  { class: label === 'Total' ? 'is-total' : '' },
-                  el('td', { text: label }),
-                  el('td', { text: a.toFixed(1) }),
-                  el('td', { text: b.toFixed(1) }),
-                ),
-              ),
-            ),
-          ),
-        );
-      }
+      if (outcome.kind === 'decision') body.push(this.scorecard(outcome.card));
 
     }
 

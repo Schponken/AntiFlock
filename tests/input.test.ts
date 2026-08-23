@@ -158,3 +158,126 @@ describe('keyboard controls', () => {
     }
   });
 });
+
+/**
+ * The gamepad half of `sample()` — analogue sticks, triggers and four face
+ * buttons — had no test touching it at all: every axis could be swapped, or the
+ * whole `if (pad)` block deleted, with both suites green.
+ */
+describe('gamepad controls', () => {
+  let win: ReturnType<typeof fakeWindow>;
+  let input: InputManager;
+
+  /** Install a stand-in `navigator.getGamepads` for the duration of one test. */
+  function withPad(pad: Partial<Gamepad> | null, run: () => void): void {
+    const nav = globalThis.navigator as unknown as Record<string, unknown> | undefined;
+    const had = nav ? 'getGamepads' in nav : false;
+    const previous = nav?.getGamepads;
+    const stub = { getGamepads: () => (pad ? [pad] : []) };
+    if (nav) Object.defineProperty(nav, 'getGamepads', { value: stub.getGamepads, configurable: true });
+    else Object.defineProperty(globalThis, 'navigator', { value: stub, configurable: true });
+    try {
+      run();
+    } finally {
+      if (nav && had) Object.defineProperty(nav, 'getGamepads', { value: previous, configurable: true });
+      else if (nav) delete nav.getGamepads;
+      else delete (globalThis as Record<string, unknown>).navigator;
+    }
+  }
+
+  /** A neutral pad: sticks centred, nothing pressed. */
+  const makePad = (over: { axes?: number[]; buttons?: Record<number, number> } = {}) => {
+    const buttons = Array.from({ length: 8 }, (_, i) => {
+      const value = over.buttons?.[i] ?? 0;
+      return { pressed: value > 0.5, touched: value > 0, value };
+    });
+    return {
+      connected: true,
+      axes: over.axes ?? [0, 0, 0, 0],
+      buttons,
+    } as unknown as Gamepad;
+  };
+
+  beforeEach(() => {
+    win = fakeWindow();
+    input = new InputManager();
+    input.attach(win.target);
+  });
+
+  it('drives throttle from the left stick and steer from the right', () => {
+    // The left stick is inverted in the browser's axis convention: up is -1.
+    withPad(makePad({ axes: [0, -1, 0.8, 0] }), () => {
+      const sample = input.sample();
+      expect(sample.throttle, 'pushing the left stick up did not go forward').toBeCloseTo(1, 5);
+      expect(sample.steer, 'the right stick did not steer right').toBeGreaterThan(0.5);
+    });
+    withPad(makePad({ axes: [0, 0.6, -0.9, 0] }), () => {
+      const sample = input.sample();
+      expect(sample.throttle).toBeLessThan(-0.3);
+      expect(sample.steer).toBeLessThan(-0.5);
+    });
+  });
+
+  it('ignores stick noise inside the deadzone', () => {
+    withPad(makePad({ axes: [0, -0.05, 0.05, 0] }), () => {
+      const sample = input.sample();
+      expect(sample.throttle, 'a resting stick was driving the machine').toBe(0);
+      expect(sample.steer, 'a resting stick was steering the machine').toBe(0);
+    });
+  });
+
+  it('drives forward and back from the triggers', () => {
+    withPad(makePad({ buttons: { 7: 1 } }), () => {
+      expect(input.sample().throttle).toBeCloseTo(1, 5);
+    });
+    withPad(makePad({ buttons: { 6: 1 } }), () => {
+      expect(input.sample().throttle).toBeCloseTo(-1, 5);
+    });
+    // Both at once cancel, rather than one silently winning.
+    withPad(makePad({ buttons: { 6: 1, 7: 1 } }), () => {
+      expect(input.sample().throttle).toBeCloseTo(0, 5);
+    });
+  });
+
+  it('maps the face buttons to weapon, fire, self-right and camera', () => {
+    withPad(makePad({ buttons: { 0: 1 } }), () => {
+      expect(input.sample().weapon, 'A did not spin the weapon up').toBe(true);
+    });
+    withPad(makePad({ buttons: { 5: 1 } }), () => {
+      expect(input.sample().weapon, 'the right bumper did not spin the weapon up').toBe(true);
+    });
+    input.resetEdges();
+    withPad(makePad({ buttons: { 1: 1 } }), () => {
+      expect(input.sample().fire, 'B did not fire').toBe(true);
+      expect(input.sample().fire, 'a held B fired twice').toBe(false);
+    });
+    input.resetEdges();
+    withPad(makePad({ buttons: { 3: 1 } }), () => {
+      expect(input.sample().selfRight, 'Y did not self-right').toBe(true);
+      expect(input.sample().selfRight, 'a held Y self-righted twice').toBe(false);
+    });
+    withPad(makePad({ buttons: { 2: 1 } }), () => {
+      input.sample();
+      expect(input.consumeCameraToggle(), 'X did not toggle the camera').toBe(true);
+      expect(input.consumeCameraToggle(), 'the camera toggle latched on').toBe(false);
+    });
+  });
+
+  it('leaves the keyboard in charge when no pad is connected', () => {
+    win.emit('keydown', { code: 'KeyW', target: null });
+    withPad(null, () => expect(input.sample().throttle).toBe(1));
+    // A disconnected pad must not blank the keyboard either.
+    withPad({ ...makePad({ axes: [0, 0, 0, 0] }), connected: false } as Gamepad, () => {
+      expect(input.sample().throttle, 'a disconnected pad overrode the keyboard').toBe(1);
+    });
+  });
+
+  it('keeps the keyboard live for keys the pad is not moving', () => {
+    win.emit('keydown', { code: 'KeyD', target: null });
+    withPad(makePad({ axes: [0, -1, 0, 0] }), () => {
+      const sample = input.sample();
+      expect(sample.throttle, 'the pad did not take the throttle').toBeCloseTo(1, 5);
+      expect(sample.steer, 'a centred pad stick cancelled the steering key').toBe(1);
+    });
+  });
+});

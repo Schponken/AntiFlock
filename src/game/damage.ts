@@ -42,6 +42,9 @@ export interface HitInput {
   squareness: number;
   /** The surface being struck. */
   targetMaterial: MaterialSpec;
+  /** Millimetres of plate at the point of impact. Drives how much shock the
+   *  panel passes into the frame — see `plateStiffness`. */
+  plateThicknessMm: number;
   /** Part taking the hit. */
   part: PartState;
 }
@@ -93,6 +96,34 @@ export const SHOCK_COUPLING = 0.3;
  */
 export const WEAPON_WEAR = 0.05;
 
+/** Plate thickness the stiffness curve is normalised on, millimetres. */
+export const NOMINAL_PLATE_MM = 10;
+
+/**
+ * How hard a panel of this thickness drives its own mountings.
+ *
+ * A panel does two things with a hit: it eats some of it, and it hands the rest
+ * to whatever it is bolted to. On the HP term alone the thickness slider had
+ * exactly one right answer. Hold the armour *mass* fixed and the plated area
+ * falls as `1/t`, so `armorHp = area * t^1.15 * toughness` still grows as
+ * `t^0.15` — thicker is free HP, and the only reason to run thin plate was to
+ * cover more of the shell.
+ *
+ * That is not what thick plate does in the sport. A thin panel is compliant: it
+ * dishes, and spreading the same impulse over a longer contact time is exactly
+ * what keeps the peak force out of the standoffs. A thick one is a rigid beam
+ * that hands the whole spike to the frame rails behind it. Modelled as the
+ * transmitted share rising with the square root of thickness, which puts a
+ * `t^0.5` penalty against a `t^0.15` gain and gives the slider a genuine
+ * interior optimum: thick plate buys panels that survive and a frame that does
+ * not, thin plate the reverse, and where the balance sits depends on how ductile
+ * the material is. Clamped at both ends so neither extreme is degenerate.
+ */
+export function plateStiffness(thicknessMm: number): number {
+  const t = clamp(thicknessMm, 1, 40) / NOMINAL_PLATE_MM;
+  return clamp(t ** 0.5, 0.45, 1.7);
+}
+
 /**
  * Fraction of the incoming energy that couples into the target.
  *
@@ -130,7 +161,7 @@ export function transferFraction(
  * identity: the panel was losing energy that the strike never carried.
  */
 export function resolveHit(input: HitInput): HitResult {
-  const { energy, bite, squareness, targetMaterial, part } = input;
+  const { energy, bite, squareness, targetMaterial, plateThicknessMm, part } = input;
   const fraction = transferFraction(squareness, targetMaterial, bite);
   const energyTransferred = Math.max(0, energy) * fraction;
   const damage = energyTransferred;
@@ -149,7 +180,8 @@ export function resolveHit(input: HitInput): HitResult {
   // Ductility squared: compliance is what concentrates the load on the mountings,
   // and it does so faster than linearly.
   const rebuffed = Math.max(0, Math.max(0, energy) - energyTransferred);
-  const shock = rebuffed * SHOCK_COUPLING * targetMaterial.ductility ** 2;
+  const shock =
+    rebuffed * SHOCK_COUPLING * targetMaterial.ductility ** 2 * plateStiffness(plateThicknessMm);
 
   return {
     energyTransferred,

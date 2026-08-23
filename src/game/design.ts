@@ -99,6 +99,9 @@ export interface DerivedStats {
 
   /** Joules of armour integrity across the whole shell. */
   armorHp: number;
+  /** Millimetres of plate, clamped to the buildable range. Drives how much of a
+   *  hit the panels pass through into the frame. */
+  armorThicknessMm: number;
   frameHp: number;
 
   /** Drivetrain. */
@@ -248,6 +251,7 @@ export function computeStats(design: BotDesign): DerivedStats {
   return {
     parts,
     armorMass,
+    armorThicknessMm: thicknessMm,
     driveMass,
     weaponMass,
     rotorMassKg: rotorKg,
@@ -305,6 +309,20 @@ export function validateDesign(design: BotDesign): ValidationIssue[] {
 
   if (!design.name.trim()) {
     issues.push({ level: 'error', message: 'Your bot needs a name.' });
+  }
+
+  if (weapon.kind === 'wedge' && stats.parts.accessories.includes('forks')) {
+    /*
+     * Both build the same front hull, so on a machine whose *weapon* is a wedge the
+     * forks only lengthen and shallow the ramp it already has — worth having, but
+     * nothing like the 3.1 kg step-change they are on a machine with no wedge at
+     * all, and the builder was charging for it silently.
+     */
+    issues.push({
+      level: 'warning',
+      message:
+        'Forks on a wedge bot only extend the wedge you already have — 3.1 kg for a longer, shallower ramp.',
+    });
   }
 
   if (!stats.invertible && !stats.hasSrimech) {

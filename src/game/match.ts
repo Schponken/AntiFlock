@@ -45,7 +45,7 @@ export type MatchState = 'intro' | 'fighting' | 'knockout' | 'decision' | 'finis
 export type MatchOutcome =
   | { kind: 'ko'; winner: Bot; loser: Bot; reason: string }
   | { kind: 'decision'; winner: Bot; loser: Bot; card: JudgeCard }
-  | { kind: 'draw' };
+  | { kind: 'draw'; card: JudgeCard };
 
 export interface MatchEvents {
   state: { state: MatchState };
@@ -485,9 +485,14 @@ export class Match {
     );
 
     if (card.draw) {
-      // Nothing separated them — usually two machines that never got going. The
-      // `draw` outcome exists for exactly this and was previously unreachable.
-      this.outcome = { kind: 'draw' };
+      /*
+       * Nothing separated them — usually two machines that never got going. The
+       * `draw` outcome exists for exactly this and was previously unreachable.
+       * It carries the card too: the results screen promised "a card and a
+       * report" for a draw and then had nothing to print, because the level
+       * scorecard was being thrown away here.
+       */
+      this.outcome = { kind: 'draw', card };
       this.camera.orbitAround(this.player);
       this.say("Time! And the judges can't split them — this one is a draw!", true);
       this.events.emit('outcome', this.outcome);

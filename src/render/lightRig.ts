@@ -10,7 +10,7 @@
 import * as THREE from 'three';
 import { ARENA_HALF, WALL_HEIGHT } from '../game/arena.ts';
 import { clamp01, damp } from '../core/mathx.ts';
-import { getRenderProfile } from './profile.ts';
+import { getRenderProfile, onRenderProfileChange, type RenderProfile } from './profile.ts';
 import { prefersReducedMotion } from '../core/motion.ts';
 import { makeLampGrid } from './textures.ts';
 
@@ -47,6 +47,8 @@ export class LightRig {
   private elapsed = 0;
 
   private headless: boolean;
+  /** Torn down in `dispose`, or a finished rig keeps taking profile changes. */
+  private unsubscribeProfile: (() => void) | null = null;
 
   constructor(options: { headless?: boolean } = {}) {
     this.headless = options.headless ?? false;
@@ -89,14 +91,14 @@ export class LightRig {
       spot.target.position.set(x * 0.35, 0, z * 0.35);
       // Each shadow-casting light is a full extra render pass, so only as many as
       // the profile allows actually cast; the rest still light the scene.
+      spot.shadow.camera.near = 1;
+      spot.shadow.camera.far = 24;
+      spot.shadow.bias = -0.0012;
+      spot.shadow.normalBias = 0.02;
       if (shadowCastersLeft > 0) {
         shadowCastersLeft--;
         spot.castShadow = true;
         spot.shadow.mapSize.set(profile.shadowMapSize, profile.shadowMapSize);
-        spot.shadow.camera.near = 1;
-        spot.shadow.camera.far = 24;
-        spot.shadow.bias = -0.0012;
-        spot.shadow.normalBias = 0.02;
       }
       this.group.add(spot);
       this.group.add(spot.target);
@@ -116,6 +118,38 @@ export class LightRig {
       this.group.add(fill);
       this.houseLights.push(fill);
     }
+
+    /*
+     * Follow the profile down mid-match.
+     *
+     * Each shadow-casting bank is a full extra render pass, and the adaptive path
+     * exists to shed exactly that — but the casters were fixed at construction, so
+     * a machine that dropped from high to low kept paying for four shadow passes
+     * for the rest of the fight and only shed pixel ratio and bloom. Reapplying
+     * here is cheap: `castShadow` and the map size are the whole cost.
+     */
+    const applyBanks = (next: RenderProfile): void => {
+      let left = next.shadows ? next.shadowCasters : 0;
+      for (const bank of this.arenaBanks) {
+        const casting = left > 0;
+        if (casting) left--;
+        if (bank.castShadow !== casting) {
+          bank.castShadow = casting;
+          // Three keeps the render target alive on a light that has stopped
+          // casting; releasing it is the point of turning the caster off.
+          if (!casting) {
+            bank.shadow.map?.dispose();
+            bank.shadow.map = null;
+          }
+        }
+        if (casting && bank.shadow.mapSize.x !== next.shadowMapSize) {
+          bank.shadow.mapSize.set(next.shadowMapSize, next.shadowMapSize);
+          bank.shadow.map?.dispose();
+          bank.shadow.map = null;
+        }
+      }
+    };
+    this.unsubscribeProfile = onRenderProfileChange(applyBanks);
 
     // --- Searchlights on yokes ---------------------------------------------
     const beamMaterial = new THREE.MeshBasicMaterial({
@@ -329,6 +363,8 @@ export class LightRig {
   }
 
   dispose(): void {
+    this.unsubscribeProfile?.();
+    this.unsubscribeProfile = null;
     // Shadow-casting lights own a render target each; `Light.dispose()` is what
     // releases it. Walking only the meshes left every match's shadow maps resident.
     this.group.traverse((object) => {

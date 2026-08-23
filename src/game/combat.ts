@@ -270,6 +270,7 @@ export class Combat {
       bite: weapon.bite,
       squareness,
       targetMaterial: defender.stats.parts.armor,
+      plateThicknessMm: defender.stats.armorThicknessMm,
       part,
     });
 
@@ -291,7 +292,8 @@ export class Combat {
     // What the panel refused comes back up the weapon, scaled by how hard that
     // panel is. Hitting tool steel blunts a rotor; hitting plastic barely marks it.
     const refused = Math.max(0, available - result.energyTransferred);
-    attacker.damage.wearWeapon(refused * WEAPON_WEAR * defender.stats.parts.armor.hardness);
+    const wear = refused * WEAPON_WEAR * defender.stats.parts.armor.hardness;
+    attacker.damage.wearWeapon(wear);
 
     /*
      * Plastic deformation has to come from somewhere: take it out of the rotor.
@@ -309,7 +311,19 @@ export class Combat {
      * double-counting.) A big hit now genuinely costs a spinner its wind-up, which
      * is the single most recognisable rhythm in the sport.
      */
-    if (weapon.rotor) attacker.bleedWeaponEnergy(result.energyTransferred + result.shockConsumed);
+    /*
+     * The rotor pays for everything the strike spent, and for nothing it did not.
+     *
+     * `damage` is the *consumed* figure — a panel already at zero absorbs no more —
+     * whereas `energyTransferred` is what was offered, so bleeding the latter had
+     * the rotor paying for overkill that never entered any structure. Weapon wear
+     * is the other direction: real joule-denominated damage to the attacker's own
+     * weapon that nothing was ever debited for, 11-13% of a strike conjured out of
+     * nowhere. Both belong in the same sum.
+     */
+    if (weapon.rotor) {
+      attacker.bleedWeaponEnergy(inflicted + wear);
+    }
 
     this.events.emit('impact', {
       position: point.clone(),
@@ -369,6 +383,7 @@ export class Combat {
         bite: 0.4,
         squareness: 0.5,
         targetMaterial: bot.stats.parts.armor,
+        plateThicknessMm: bot.stats.armorThicknessMm,
         part,
       });
       this.hitCooldowns.set(key, 0.4);
@@ -409,6 +424,7 @@ export class Combat {
         bite: 0.5,
         squareness: 0.55,
         targetMaterial: victim.bot.stats.parts.armor,
+        plateThicknessMm: victim.bot.stats.armorThicknessMm,
         part,
       });
       aggressor.bot.aggression += 0.05;
@@ -458,6 +474,7 @@ export class Combat {
       bite: kind === 'pulverizer' ? 1.3 : 0.9,
       squareness: 0.8,
       targetMaterial: bot.stats.parts.armor,
+      plateThicknessMm: bot.stats.armorThicknessMm,
       part,
     });
 

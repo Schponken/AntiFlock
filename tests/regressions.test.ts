@@ -9,7 +9,7 @@
 
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { clamp } from '../src/core/mathx.ts';
+import { clamp, kgToLb, mpsToMph } from '../src/core/mathx.ts';
 import { FIXED_DT, PhysicsWorld, initRapier } from '../src/physics/world.ts';
 import { Combat } from '../src/game/combat.ts';
 import { ARENA_HALF, Arena, WALL_HEIGHT } from '../src/game/arena.ts';
@@ -18,6 +18,7 @@ import {
   PRESETS,
   computeStats,
   makeDefaultDesign,
+  GEAR_RATIO_RANGE,
   presetById,
   validateDesign,
   type BotDesign,
@@ -25,6 +26,8 @@ import {
 import {
   ACCESSORIES,
   CHASSIS,
+  DRIVE_MOTORS,
+  chassisById,
   MATERIALS,
   WEAPONS,
   WHEELS,
@@ -33,10 +36,13 @@ import {
   rotorInertiaTensor,
   weaponById,
   weaponMountFor,
+  type AccessoryEffect,
 } from '../src/game/parts.ts';
 import {
   BotDamage,
+  NOMINAL_PLATE_MM,
   SHOCK_COUPLING,
+  plateStiffness,
   resolveHit,
   scoreJudges,
   transferFraction,
@@ -45,7 +51,7 @@ import { DEBRIS_GROUPS, Layer, filterOf } from '../src/physics/groups.ts';
 import { HIT_COOLDOWN } from '../src/game/combat.ts';
 import type { Bot } from '../src/game/bot.ts';
 import { StartSequence } from '../src/game/startSequence.ts';
-import { panelGeometry } from '../src/render/botMesh.ts';
+import { panelGeometry, wedgeDimensions } from '../src/render/botMesh.ts';
 import { GeometryRegistry } from '../src/render/hardware.ts';
 
 beforeAll(async () => {
@@ -533,6 +539,7 @@ describe('damage accounting', () => {
           bite,
           squareness: 0.9,
           targetMaterial: material,
+          plateThicknessMm: NOMINAL_PLATE_MM,
           part: part(),
         });
         expect(result.damage).toBeLessThanOrEqual(result.energyTransferred + 1e-6);
@@ -548,6 +555,7 @@ describe('damage accounting', () => {
         bite: 1,
         squareness: 0.8,
         targetMaterial: material,
+        plateThicknessMm: NOMINAL_PLATE_MM,
         part: part(),
       });
       expect(result.energyTransferred + result.shock).toBeLessThanOrEqual(10_000);
@@ -556,34 +564,54 @@ describe('damage accounting', () => {
   });
 
   it('has no strictly dominant armour material', () => {
-    // For each material, how much strike energy the machine survives and how fast
-    // it wears the attacker's weapon down. A material that beats every other on
-    // both, at no weight cost, would make the armour choice meaningless.
-    const rows = MATERIALS.map((material) => {
-      const design = makeDefaultDesign();
-      design.armorMaterialId = material.id;
-      // Thickest legal plate that keeps the build under 14 kg of armour.
-      let thickness = 3;
-      for (let mm = 3; mm <= 20; mm += 0.5) {
-        design.armorThicknessMm = mm;
-        if (computeStats(design).armorMass > 14) break;
-        thickness = mm;
-      }
-      design.armorThicknessMm = thickness;
-      const stats = computeStats(design);
-      const damage = new BotDamage(stats);
-      const fraction = transferFraction(0.7, material, 1);
-      const panel = damage.get('armor-front')!.maxHp / fraction;
-      const frame = stats.frameHp / ((1 - fraction) * SHOCK_COUPLING * material.ductility ** 2);
-      return {
-        id: material.id,
-        mass: stats.armorMass,
-        cost: material.costPerKg,
-        survives: Math.min(panel, frame),
-        wearsWeapon: (1 - fraction) * material.hardness,
-      };
-    });
+    /*
+     * For each material: how much strike energy the machine survives, how fast it
+     * wears the attacker's weapon down, what it weighs, and how well it holds the
+     * floor. A material that beats every other on all four would make the armour
+     * choice meaningless.
+     *
+     * `costPerKg` used to be one of the axes, and it should not have been: nothing
+     * in the game spends money — there is no budget, the build cost is a readout —
+     * so a material could be dead on every axis the simulation reads and the test
+     * would still pass on the strength of a price tag. Dropping it exposed two
+     * entries that were strictly worse than another plate in every way that
+     * reaches the solver. Floor friction replaces it: that one really does decide
+     * push matches, and it is why UHMW is worth its slipperiness.
+     *
+     * The comparison is at equal plate thickness, which is the one the builder's
+     * own controls present: you pick a material and a thickness and the weight
+     * follows. Comparing at equal armour *mass* instead pins the mass axis to the
+     * budget by construction, so it degenerates to a three-axis test that a
+     * premium material is entitled to win — titanium beats carbon on everything
+     * once you have already agreed to spend the same 14 kg on both, which says
+     * nothing about whether carbon is worth building.
+     */
+    const table = (thickness: number) =>
+      MATERIALS.map((material) => {
+        const design = makeDefaultDesign();
+        design.armorMaterialId = material.id;
+        design.armorCoverage = 1;
+        design.armorThicknessMm = thickness;
+        const stats = computeStats(design);
+        const damage = new BotDamage(stats);
+        const fraction = transferFraction(0.7, material, 1);
+        const panel = damage.get('armor-front')!.maxHp / fraction;
+        const frame =
+          stats.frameHp /
+          ((1 - fraction) *
+            SHOCK_COUPLING *
+            material.ductility ** 2 *
+            plateStiffness(thickness));
+        return {
+          id: material.id,
+          mass: stats.armorMass,
+          grip: material.friction,
+          survives: Math.min(panel, frame),
+          wearsWeapon: (1 - fraction) * material.hardness,
+        };
+      });
 
+    const rows = table(10);
     for (const a of rows) {
       const dominated = rows.filter(
         (b) =>
@@ -591,13 +619,130 @@ describe('damage accounting', () => {
           a.survives >= b.survives &&
           a.wearsWeapon >= b.wearsWeapon &&
           a.mass <= b.mass &&
-          a.cost <= b.cost,
+          a.grip >= b.grip,
       );
       expect(
         dominated.map((b) => b.id),
         `${a.id} is strictly better than ${dominated.map((b) => b.id).join(', ')}`,
       ).toEqual([]);
     }
+
+    // And the weight spread across the catalogue has to be big enough that the
+    // choice is a real one: the heaviest plate is several times the lightest.
+    const masses = rows.map((r) => r.mass);
+    expect(Math.max(...masses) / Math.min(...masses)).toBeGreaterThan(4);
+  });
+
+  it('has no strictly dominant drive motor', () => {
+    /*
+     * The gear slider spans 6:1 to 40:1 — a 6.7x range — so a faster motor can
+     * always be geared down onto a slower one\'s speed band, and a motor is only
+     * distinct if its *envelope* is. Comparing peak wheel torque and peak wheel
+     * speed across the whole slider range (and mass) is that envelope. The
+     * Ironhide 750 failed this: at 3100 rpm x 6.2 Nm its shaft power sat below the
+     * Vortex 63 while it weighed almost twice as much, so there was no build in
+     * which it was the right motor and the choice was decoration.
+     */
+    const rows = DRIVE_MOTORS.map((motor) => ({
+      id: motor.id,
+      mass: motor.mass,
+      // Peak pushing torque at the wheel, and peak wheel speed, across the slider.
+      torque: motor.stallTorque * GEAR_RATIO_RANGE.max,
+      speed: motor.freeRpm / GEAR_RATIO_RANGE.min,
+    }));
+    for (const a of rows) {
+      const dominated = rows.filter(
+        (b) => b.id !== a.id && a.torque >= b.torque && a.speed >= b.speed && a.mass <= b.mass,
+      );
+      expect(
+        dominated.map((b) => b.id),
+        `${a.id} is strictly better than ${dominated.map((b) => b.id).join(', ')}`,
+      ).toEqual([]);
+    }
+  });
+
+  it('has no strictly dominant wheel', () => {
+    /*
+     * Radius is not an axis on its own: the gear slider buys speed on any wheel, so
+     * a taller tyre only earns its weight through grip, through surviving hits, or
+     * through the one thing gearing cannot do — clearing the shell so the machine
+     * can drive upside down. The Big Roller failed on all three at once (lower grip
+     * *and* lower toughness *and* 0.7 kg more than the Solid Rubber Lug), leaving
+     * it a strictly worse tyre on every frame that was already invertible.
+     */
+    const rows = WHEELS.map((wheel) => ({
+      id: wheel.id,
+      mass: wheel.mass,
+      grip: wheel.grip,
+      toughness: wheel.toughness,
+      // Frames this wheel makes drivable upside down that a shorter one does not.
+      inverts: CHASSIS.filter(
+        (c) => !c.invertible && wheel.radius * 2 > c.height + c.groundClearance,
+      ).length,
+    }));
+    for (const a of rows) {
+      const dominated = rows.filter(
+        (b) =>
+          b.id !== a.id &&
+          a.grip >= b.grip &&
+          a.toughness >= b.toughness &&
+          a.inverts >= b.inverts &&
+          a.mass <= b.mass,
+      );
+      expect(
+        dominated.map((b) => b.id),
+        `${a.id} is strictly better than ${dominated.map((b) => b.id).join(', ')}`,
+      ).toEqual([]);
+    }
+    // And the one thing that justifies the Big Roller has to actually be there.
+    expect(
+      rows.find((r) => r.id === 'bigroller')!.inverts,
+      'the tallest wheel makes no frame invertible, so its weight buys nothing',
+    ).toBeGreaterThan(0);
+  });
+
+  it('leaves the armour thickness slider with more than one right answer', () => {
+    /*
+     * `armorHp` goes as `t^1.15` while armour mass goes as `t`, so at a fixed
+     * armour weight the plated area falls as `1/t` and the panel still gains as
+     * `t^0.15` — thicker plate was free HP and the slider had exactly one setting
+     * worth using. `plateStiffness` is the other side of it: a thick rigid panel
+     * hands more of the hit to the frame behind it. Panel life and frame life have
+     * to move in opposite directions across the slider, or the control is a lie.
+     */
+    const material = materialById('hardox');
+    const design = makeDefaultDesign();
+    design.armorMaterialId = material.id;
+    design.armorCoverage = 1;
+
+    const sample = (mm: number) => {
+      design.armorThicknessMm = mm;
+      const stats = computeStats(design);
+      const damage = new BotDamage(stats);
+      const fraction = transferFraction(0.7, material, 1);
+      return {
+        armorMass: stats.armorMass,
+        panel: damage.get('armor-front')!.maxHp / fraction,
+        frame:
+          stats.frameHp /
+          ((1 - fraction) * SHOCK_COUPLING * material.ductility ** 2 * plateStiffness(mm)),
+      };
+    };
+
+    const thin = sample(4);
+    const thick = sample(16);
+    expect(thick.panel, 'thicker plate did not make the panels last longer').toBeGreaterThan(
+      thin.panel,
+    );
+    expect(thick.frame, 'thicker plate did not push more shock into the frame').toBeLessThan(
+      thin.frame,
+    );
+    expect(thick.armorMass, 'thicker plate cost no weight').toBeGreaterThan(thin.armorMass * 1.5);
+    // And the trade has to be worth something: a token difference is still one
+    // right answer with rounding on top.
+    expect(thin.frame / thick.frame, 'the frame barely notices the plate spec').toBeGreaterThan(
+      1.4,
+    );
   });
 
   it('calls a fight nobody scored in a draw, not a unanimous decision', () => {
@@ -1271,6 +1416,7 @@ describe('energy conservation', () => {
       bite: 1,
       squareness: 0.85,
       targetMaterial: stats.parts.armor,
+      plateThicknessMm: NOMINAL_PLATE_MM,
       part: panel,
     });
 
@@ -1728,5 +1874,324 @@ describe('opponent AI behaviour', () => {
     }
     expect(reversed, 'the AI pushed at a wall forever').toBe(true);
     world.free();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wiring the sweep found untested: constants nothing pinned, and paths that
+// could be deleted outright with both suites green.
+// ---------------------------------------------------------------------------
+
+describe('instrumentation', () => {
+  it('bills a strike per tooth at a rate the cooldown actually sets', () => {
+    /*
+     * The existing per-tooth test bounds hits by `seconds / HIT_COOLDOWN` — the
+     * constant on both sides of its own assertion, so the cooldown could be
+     * lengthened 66x (to five seconds, one strike per engagement) and stay green.
+     * The bounds here are absolute.
+     *
+     * The physical reasoning: at 480 Hz a solver step is 2.08 ms, and a single
+     * contact manifold persists for tens of steps, so the debounce has to be well
+     * above one step or every manifold bills dozens of times. It also has to stay
+     * below the interval between genuinely separate strikes — a two-tooth bar at
+     * 250 rad/s presents a tooth every 12.6 ms — or real hits are swallowed.
+     */
+    expect(HIT_COOLDOWN, 'the debounce is under one solver step').toBeGreaterThan(FIXED_DT * 8);
+    expect(HIT_COOLDOWN, 'the debounce swallows separate strikes').toBeLessThan(0.12);
+
+    // And the window has to actually drain on that schedule, not on a step count.
+    const { world, red, blue, combat } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+    const cooldowns = (combat as unknown as { hitCooldowns: Map<string, number> }).hitCooldowns;
+    cooldowns.set('probe', HIT_COOLDOWN);
+    run(world, HIT_COOLDOWN * 0.5);
+    expect(cooldowns.has('probe'), 'the debounce expired inside its own window').toBe(true);
+    run(world, HIT_COOLDOWN * 0.6);
+    expect(cooldowns.has('probe'), 'the debounce never expired').toBe(false);
+
+    let weaponHits = 0;
+    combat.events.on('impact', (impact) => {
+      if (impact.kind === 'weapon') weaponHits += 1;
+    });
+    red.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+    run(world, 6);
+    red.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+    blue.setInput({ throttle: -1, steer: 0, weapon: false, fire: false, selfRight: false });
+    run(world, 10);
+
+    // Sixteen seconds of a driven spinner against a driven wedge. Real strikes are
+    // rate-limited by spin-up, not by the debounce — but per-step billing would put
+    // this in the thousands, which is the failure the debounce exists to prevent.
+    expect(weaponHits, 'the weapon never landed at all').toBeGreaterThan(0);
+    expect(weaponHits, 'strikes were billed per step, not per tooth').toBeLessThan(400);
+    world.free();
+  });
+
+  it('credits the attacker with every joule the defender lost', () => {
+    /*
+     * `damageDealt = result.damage + result.shockConsumed`. Dropping the shock term
+     * left up to 43% of the damage an attacker inflicted uncredited, and both
+     * suites stayed green because nothing compared the two ledgers. This does: in a
+     * fight with no hazards under either machine, the attacker's credit and the
+     * defender's losses are the same joules seen from opposite ends.
+     */
+    const armored = { ...presetById('doorstop').design, armorMaterialId: 'hdpe' };
+    const { world, red, blue } = fight(presetById('sparkplug').design, armored);
+    red.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+    run(world, 6);
+    red.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+    run(world, 8);
+
+    const taken = blue.damage.totalDamageTaken;
+    expect(taken, 'nothing landed, so the ledgers prove nothing').toBeGreaterThan(50);
+    // Hazards and walls also damage, and they credit nobody — so the attacker's
+    // credit is a lower bound on the defender's losses, never a smaller number.
+    expect(
+      red.damageDealt,
+      'the attacker was credited with less than half of what it did',
+    ).toBeGreaterThan(taken * 0.5);
+    // And the shock component specifically has to be in there: on plastic armour
+    // the panel refuses most of the hit, so a damage-only ledger is far short.
+    const panels = blue.damage.parts.filter((p) => p.kind === 'armor');
+    const absorbedByPanels = panels.reduce((sum, p) => sum + p.absorbed, 0);
+    expect(taken, 'no shock reached the frame at all').toBeGreaterThan(absorbedByPanels * 1.02);
+  });
+
+  it('blunts the weapon on hard armour and barely marks it on soft', () => {
+    /*
+     * `WEAPON_WEAR` could be set to zero with every gate green: nothing observed a
+     * weapon losing condition. It is also the whole reason a heavy hard armour
+     * package is worth its mass, so it has to be *differential* — tool steel has to
+     * cost the attacker more than plastic does.
+     */
+    const wear = (material: string): number => {
+      const target = { ...presetById('doorstop').design, armorMaterialId: material };
+      const { world, red } = fight(presetById('sparkplug').design, target);
+      red.setInput({ throttle: 0, steer: 0, weapon: true, fire: false, selfRight: false });
+      run(world, 6);
+      red.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+      run(world, 8);
+      const weapon = red.damage.parts.find((p) => p.id === 'weapon')!;
+      world.free();
+      return weapon.absorbed;
+    };
+
+    const hard = wear('s7');
+    const soft = wear('hdpe');
+    expect(hard, 'the rotor came off hardened tool steel without a mark').toBeGreaterThan(0);
+    expect(hard, 'armour hardness does not reach the attacker at all').toBeGreaterThan(soft * 1.5);
+  });
+
+  it('binds the drivetrain when the frame folds, in a real world', () => {
+    /*
+     * `mobility` scaling on `frameIntegrity` was only ever read in a unit test of
+     * the getter, so the line that multiplies engine force by it could be deleted
+     * and nothing noticed. Drive the same machine twice in a real world, once with
+     * a bent frame.
+     */
+    const distance = (bend: boolean): number => {
+      const { world, bot } = solo(presetById('sparkplug').design);
+      run(world, 1);
+      if (bend) {
+        const frame = bot.damage.parts.find((p) => p.id === 'frame')!;
+        frame.hp = frame.maxHp * 0.05;
+      }
+      const start = bot.position(new THREE.Vector3());
+      drive(bot, 1);
+      run(world, 2);
+      const travelled = bot.position(new THREE.Vector3()).sub(start).length();
+      world.free();
+      return travelled;
+    };
+
+    const healthy = distance(false);
+    const bent = distance(true);
+    expect(healthy, 'the healthy machine never moved').toBeGreaterThan(1);
+    expect(bent, 'a folded frame did not slow the machine at all').toBeLessThan(healthy * 0.85);
+  });
+
+  it('scores aggression for closing and control for holding the angle', () => {
+    /*
+     * `tickJudging` — the entire basis of a decision — was driven by no test. Its
+     * body could be emptied and only the two match-level tests that set the tallies
+     * by hand would have anything to say.
+     */
+    const { world, red, blue } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+    run(world, 1);
+    red.aggression = 0;
+    red.control = 0;
+    blue.aggression = 0;
+    blue.control = 0;
+
+    // Red drives at blue; blue sits still with no throttle.
+    drive(red, 1);
+    drive(blue, 0);
+    run(world, 3);
+
+    expect(red.aggression, 'closing on the opponent scored no aggression').toBeGreaterThan(0);
+    // Blue is not pinned at zero: being rammed credits the *aggressor*, but a shove
+    // also lands a hit, and a landed hit pays its attacker a sliver of aggression
+    // whichever machine it was. What must hold is that the machine doing the
+    // driving is the one the card rewards.
+    expect(
+      blue.aggression,
+      'the machine that never moved scored as much aggression as the one closing',
+    ).toBeLessThan(red.aggression * 0.5);
+    expect(red.control, 'driving at the opponent scored no control').toBeGreaterThan(0);
+  });
+
+  it('gives a reversing machine no aggression for running away', () => {
+    const { world, red } = fight(
+      presetById('sparkplug').design,
+      presetById('doorstop').design,
+    );
+    run(world, 1);
+    red.aggression = 0;
+    drive(red, -1);
+    run(world, 3);
+    expect(red.aggression, 'backing away from the opponent scored as aggression').toBe(0);
+  });
+
+  it('fires the srimech only when it is inverted, working, and off cooldown', () => {
+    /*
+     * The whole self-righting path — the inverted guard, the destroyed-srimech
+     * guard, and the 2.4 s cooldown — was reachable from no test: the method could
+     * `return` on its first line and both suites stayed green.
+     */
+    const { world, bot } = solo(presetById('sparkplug').design);
+    run(world, 1);
+    const inner = bot as unknown as {
+      srimechCooldown: number;
+      chassis: { rotation(): { x: number; y: number; z: number; w: number }; setRotation(q: unknown, wake: boolean): void };
+    };
+    const press = (down: boolean): void =>
+      bot.setInput({ throttle: 0, steer: 0, weapon: false, fire: false, selfRight: down });
+
+    // Upright: pressing the button must do nothing at all.
+    press(true);
+    world.step();
+    expect(bot.inverted, 'the machine started the test on its back').toBe(false);
+    expect(inner.srimechCooldown, 'the srimech fired while the machine was upright').toBe(0);
+
+    // Roll it onto its back and hold it there, so the guard sees a real pose
+    // rather than a poked flag.
+    const onBack = { x: 1, y: 0, z: 0, w: 0 };
+    const flip = (): void => inner.chassis.setRotation(onBack, true);
+
+    press(false);
+    flip();
+    world.step();
+    expect(bot.inverted, 'the machine did not read as inverted').toBe(true);
+    press(true);
+    flip();
+    world.step();
+    const armed = inner.srimechCooldown;
+    expect(armed, 'an inverted machine could not self-right').toBeGreaterThan(1);
+
+    // A second press inside the cooldown must not re-arm it.
+    press(false);
+    flip();
+    world.step();
+    press(true);
+    flip();
+    world.step();
+    expect(inner.srimechCooldown, 'the srimech re-armed inside its own cooldown').toBeLessThan(
+      armed,
+    );
+
+    // A destroyed srimech is a machine that stays on its back.
+    inner.srimechCooldown = 0;
+    bot.damage.parts.find((p) => p.id === 'srimech')!.destroyed = true;
+    press(false);
+    flip();
+    world.step();
+    press(true);
+    flip();
+    world.step();
+    expect(inner.srimechCooldown, 'a destroyed srimech still worked').toBe(0);
+    world.free();
+  });
+
+  it('makes ground-scraping forks change the machine even on a wedge bot', () => {
+    /*
+     * `hasWedge = weapon.kind === 'wedge' || accessories.includes('forks')`, and
+     * both branches built the identical hull — so bolting 3.1 kg of forks onto a
+     * Fixed Wedge bot, which is exactly what the Doorstop preset does, bought
+     * nothing at all. The tines now run further forward on a shallower angle, and
+     * the collider and the mesh are built from the same numbers.
+     */
+    const plain = wedgeDimensions(chassisById('lowwedge'), false);
+    const forked = wedgeDimensions(chassisById('lowwedge'), true);
+    expect(forked.depth, 'forks do not reach any further than a plough face').toBeGreaterThan(
+      plain.depth,
+    );
+    const angle = (d: { rise: number; depth: number }): number => Math.atan2(d.rise, d.depth);
+    expect(
+      angle(forked),
+      'forks do not meet the floor any shallower than a plough face',
+    ).toBeLessThan(angle(plain) * 0.9);
+
+    /*
+     * And it has to reach the machine the solver runs, not just the geometry
+     * helper. The wedge collider a forked machine is built with is longer and
+     * slipperier than the one a plough face gets — polished titanium tines against
+     * a welded steel face — so both numbers are read straight off the rig.
+     */
+    const rig = (accessories: AccessoryEffect[]) => {
+      const design = { ...presetById('doorstop').design, accessories };
+      const { world, bot } = solo(design);
+      run(world, 1);
+      const body = bot as unknown as {
+        chassis: {
+          numColliders(): number;
+          collider(i: number): { friction(): number };
+        };
+      };
+      let slipperiest = Infinity;
+      for (let i = 0; i < body.chassis.numColliders(); i++) {
+        const collider = body.chassis.collider(i);
+        slipperiest = Math.min(slipperiest, collider.friction());
+      }
+      world.free();
+      return { slipperiest };
+    };
+
+    const forkedRig = rig(['srimech', 'forks']);
+    const ploughRig = rig(['srimech']);
+    expect(
+      forkedRig.slipperiest,
+      'a forked machine is no slipperier at the nose than a plough face',
+    ).toBeLessThan(ploughRig.slipperiest);
+
+    // And the builder has to say so, rather than quietly charging 3.1 kg for an
+    // extension of a wedge the machine already has.
+    const doubled = validateDesign({
+      ...presetById('doorstop').design,
+      accessories: ['srimech', 'forks'],
+    });
+    expect(
+      doubled.some((issue) => /wedge/i.test(issue.message) && /fork/i.test(issue.message)),
+      'nothing warns that forks on a wedge bot only extend the wedge',
+    ).toBe(true);
+  });
+
+  it('converts to the units the HUD and the builder print', () => {
+    /*
+     * Every speed the player reads is `mpsToMph`, and every weight is `kgToLb`, and
+     * neither factor was pinned anywhere: both were free to be off by any amount
+     * with the suites green, and the numbers would still look plausible.
+     */
+    expect(mpsToMph(1), 'a metre per second is not 2.2369 mph').toBeCloseTo(2.2369362921, 9);
+    expect(mpsToMph(0)).toBe(0);
+    expect(mpsToMph(-3), 'the conversion is not signed').toBeCloseTo(-6.7108, 3);
+    // 26.8 m/s is 60 mph; a 250 lb machine is 113.4 kg.
+    expect(mpsToMph(26.8224), 'sixty miles an hour came out wrong').toBeCloseTo(60, 3);
+    expect(kgToLb(1), 'a kilogram is not 2.2046 lb').toBeCloseTo(2.2046226218, 9);
+    expect(kgToLb(113.398), 'the weight limit came out wrong').toBeCloseTo(250, 2);
   });
 });

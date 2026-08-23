@@ -22,7 +22,7 @@ import {
   makeMetalTexture,
 } from '../render/textures.ts';
 import { clamp01, smoothstep } from '../core/mathx.ts';
-import { getRenderProfile } from '../render/profile.ts';
+import { getRenderProfile, onRenderProfileChange, type RenderProfile } from '../render/profile.ts';
 
 /** Inner clear span of the box, metres. The real thing is 48 feet square. */
 export const ARENA_SIZE = 14.63;
@@ -85,6 +85,8 @@ export class Arena {
   private hazards: Hazard[] = [];
   private world: PhysicsWorld;
   private headless: boolean;
+  /** Torn down in `dispose`, or a finished arena keeps taking profile changes. */
+  private unsubscribeProfile: (() => void) | null = null;
   private time = 0;
   private crowdMaterials: THREE.MeshBasicMaterial[] = [];
 
@@ -252,6 +254,21 @@ export class Arena {
       side: THREE.DoubleSide,
       envMapIntensity: 1.6,
     });
+
+    /*
+     * The adaptive path drops quality mid-match, and refraction is the single
+     * biggest thing it is supposed to turn off. Reading the profile once here left
+     * the glass rendering the whole scene a second time for the rest of the fight,
+     * however far behind the machine had fallen.
+     */
+    const applyGlass = (next: RenderProfile): void => {
+      lexan.transmission = next.transmission ? 0.92 : 0;
+      lexan.thickness = next.transmission ? 0.06 : 0;
+      lexan.opacity = next.transmission ? 0.32 : 0.18;
+      // `transmission` crossing zero changes which shader Three compiles.
+      lexan.needsUpdate = true;
+    };
+    this.unsubscribeProfile = onRenderProfileChange(applyGlass);
 
     const kickMaps = makeMetalTexture(0x4a4f56, 9);
     const kickPlate = new THREE.MeshStandardMaterial({
@@ -763,6 +780,8 @@ export class Arena {
    * rigid bodies go with the world, which `Match` frees separately.
    */
   dispose(): void {
+    this.unsubscribeProfile?.();
+    this.unsubscribeProfile = null;
     this.group.traverse((object) => {
       if (object instanceof THREE.Mesh || object instanceof THREE.Points) {
         object.geometry.dispose();

@@ -111,9 +111,18 @@ export const MATERIALS: readonly MaterialSpec[] = [
   },
   {
     id: 'al7075',
+    /*
+     * Toughness raised from 9800. Compared at equal armour *mass* — which is the
+     * comparison the weight limit forces on the player — 7075 came out behind
+     * Hardox on energy absorbed, on weapon wear inflicted and on floor grip at the
+     * same 13.7 kg, so there was no build in which it was the right plate. At
+     * 11400 its 12.5 mm of plate outlasts Hardox's 4.5 mm, which is the actual
+     * reason a light alloy shell is worth having, and it still blunts an
+     * opponent's weapon a third as much as any of the steels.
+     */
     name: '7075 Aluminium',
     density: 2810,
-    toughness: 9800,
+    toughness: 11400,
     ductility: 0.55,
     hardness: 0.3,
     friction: 0.62,
@@ -156,11 +165,18 @@ export const MATERIALS: readonly MaterialSpec[] = [
   },
   {
     id: 'hardox',
+    /*
+     * Toughness and ductility both raised (19200 / 0.68). Hardox 450 is specified
+     * on impact toughness — around 50 J Charpy at -40 C, comfortably above AR500 —
+     * and it is the plate combat teams actually buy for exactly that reason. At the
+     * old numbers it was beaten by S7 on every axis the simulation reads, so it was
+     * a strictly worse choice with a nicer price tag, and price constrains nothing.
+     */
     name: 'Hardox 450',
     density: 7800,
-    toughness: 19200,
-    ductility: 0.68,
-    hardness: 0.88,
+    toughness: 24600,
+    ductility: 0.78,
+    hardness: 0.86,
     friction: 0.66,
     restitution: 0.3,
     costPerKg: 8,
@@ -171,9 +187,17 @@ export const MATERIALS: readonly MaterialSpec[] = [
   },
   {
     id: 's7',
+    /*
+     * Toughness dropped from 26500. S7 is a shock-*resisting* tool steel at tooling
+     * sections and hardnesses; run through-hardened at ~57 HRC in a large thin
+     * plate it has markedly lower fracture toughness than either wear plate, which
+     * is why it is a weapon-tooth material and not a body-armour one — as its own
+     * blurb says. At the old number it was the toughest, the hardest and the
+     * second-lightest steel at once, and both AR500 and Hardox were dead entries.
+     */
     name: 'S7 Tool Steel',
     density: 7830,
-    toughness: 26500,
+    toughness: 19400,
     ductility: 0.45,
     hardness: 0.98,
     friction: 0.64,
@@ -401,9 +425,19 @@ export const DRIVE_MOTORS: readonly MotorSpec[] = [
   },
   {
     id: 'ironhide',
+    /*
+     * Torque raised from 6.2 Nm. The gear slider spans 6:1 to 40:1, which is wide
+     * enough that a faster motor can always be geared down onto a slower one's
+     * speed range — so what actually ranks two motors is the product of free speed
+     * and stall torque, and at 3100 x 6.2 this one came out *below* the Vortex 63
+     * (9200 x 2.35) while weighing 0.53 kg more. There was no build in which it was
+     * the right answer. At 9.8 Nm it sits between the Vortex and the Hyperion on
+     * shaft power and well above both on torque, which is what a big slow-revving
+     * can is actually for.
+     */
     name: 'Ironhide 750',
     freeRpm: 3100,
-    stallTorque: 6.2,
+    stallTorque: 9.8,
     mass: 1.15,
     drawWatts: 900,
     cost: 320,
@@ -475,12 +509,20 @@ export const WHEELS: readonly WheelSpec[] = [
   },
   {
     id: 'bigroller',
+    /*
+     * Toughness raised from 3900. A 216 mm wheel is a lot more structure than an
+     * 178 mm one, and without that it was beaten by the Solid Rubber Lug on grip,
+     * on toughness *and* on mass, leaving only radius — which the 6:1-to-40:1 gear
+     * slider hands you for free on any wheel. Its real, un-gearable advantage is
+     * that 2 x 108 mm clears the Lowline Wedge's 202 mm shell, so it is the one
+     * wheel that makes that frame drivable upside down.
+     */
     name: 'Big Roller',
     radius: 0.108,
     width: 0.07,
     mass: 2.1,
     grip: 1.2,
-    toughness: 3900,
+    toughness: 5400,
     cost: 95,
     blurb: 'Tall enough to drive inverted and climb over a wedge. Costs you weight.',
   },

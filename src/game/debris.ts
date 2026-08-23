@@ -183,6 +183,9 @@ export class Debris {
       const maps = makeMetalTexture(0x8b9099, 41);
       material = new THREE.MeshStandardMaterial({
         color,
+        // Bind the albedo too: a panel that was wearing a livery should not turn
+        // into a flat-coloured slab the instant it comes off the machine.
+        map: maps.map,
         normalMap: maps.normalMap,
         roughnessMap: maps.roughnessMap,
         metalness: 0.7,
