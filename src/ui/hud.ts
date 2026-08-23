@@ -6,6 +6,7 @@
 
 import { clamp01 } from '../core/mathx.ts';
 import { kgToLb, mpsToMph } from '../core/mathx.ts';
+import { MOTOR_DERATE_FROM } from '../game/design.ts';
 import type { Bot } from '../game/bot.ts';
 import type { Match, MatchOutcome } from '../game/match.ts';
 import { clear, el } from './dom.ts';
@@ -218,6 +219,12 @@ export class Hud {
       if (bot.damage.mobility <= 0.5 && bot.damage.mobility > 0) flags.push('DRIVE DAMAGED');
       if (bot.damage.mobility <= 0) flags.push('IMMOBILE');
       if (bot.damage.weaponCondition <= 0) flags.push('WEAPON DEAD');
+      /*
+       * Heat has to be visible. A machine that quietly loses two thirds of its
+       * drive force after a long shove, with nothing on screen to say why, reads
+       * as the game breaking rather than as a motor doing what motors do.
+       */
+      if (bot.motorTemp >= MOTOR_DERATE_FROM) flags.push('MOTORS HOT');
       plate.status.textContent = flags.join(' · ');
       plate.status.classList.toggle('is-visible', flags.length > 0);
     }

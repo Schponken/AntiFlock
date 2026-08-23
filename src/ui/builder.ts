@@ -637,6 +637,18 @@ export class Builder {
     } else if (stats.actuatorEnergy > 0) {
       statRows.push(['Shot energy', `${stats.actuatorEnergy.toFixed(0)} J`]);
     }
+    /*
+     * The pack budget, made legible. `drawWatts` was a catalogue number nothing
+     * read and nothing showed; now that it decides whether a machine can drive
+     * while its weapon spins up, the player has to be able to see the sum before
+     * they are in the box wondering why the drive went soft.
+     */
+    const draw = stats.driveDrawWatts + stats.weaponDrawWatts;
+    statRows.push([
+      'Peak pack draw',
+      `${(draw / 1000).toFixed(1)} kW of ${(stats.packWatts / 1000).toFixed(1)} kW` +
+        (draw > stats.packWatts ? ' — sags' : ''),
+    ]);
     statRows.push(['Build cost', `$${Math.round(stats.cost).toLocaleString('en-US')}`]);
 
     this.statsPane.append(

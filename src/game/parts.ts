@@ -437,7 +437,7 @@ export const DRIVE_MOTORS: readonly MotorSpec[] = [
      */
     name: 'Ironhide 750',
     freeRpm: 3100,
-    stallTorque: 9.8,
+    stallTorque: 6.2,
     mass: 1.15,
     drawWatts: 900,
     cost: 320,
@@ -751,6 +751,24 @@ export const WEAPONS: readonly WeaponSpec[] = [
     blurb: 'No moving parts to break. Wins on control, aggression and the judges.',
   },
 ];
+
+/**
+ * Electrical load a weapon puts on the pack at full effort, watts.
+ *
+ * Spinners quote their motor directly. A pneumatic flipper runs on stored gas and
+ * draws nothing electrical worth counting — the compressor is not on the machine.
+ * A crusher is a hydraulic pump doing real work: `closeTime` was otherwise a dead
+ * field, so nothing bounded how fast the jaw was allowed to do it. The work is
+ * the bite stroke against the rated jaw force, not the whole reach — the jaw
+ * closes fast under no load and only builds force in the last few millimetres,
+ * which is why a 68 kN crusher runs on a pump you can carry rather than a 24 kW
+ * one the whole-reach figure would imply.
+ */
+export function weaponDrawWatts(weapon: WeaponSpec): number {
+  if (weapon.rotor) return weapon.rotor.motorWatts;
+  if (weapon.clamp) return (weapon.clamp.force * CLAMP_BITE_STROKE_M) / weapon.clamp.closeTime;
+  return 0;
+}
 
 export const weaponById = (id: string): WeaponSpec =>
   WEAPONS.find((w) => w.id === id) ?? WEAPONS[0]!;

@@ -22,6 +22,7 @@ import {
   rotorMass,
   tipSpeed,
   weaponById,
+  weaponDrawWatts,
   wheelById,
   type AccessoryEffect,
   type ChassisSpec,
@@ -38,6 +39,63 @@ export const BASE_ELECTRONICS_KG = 9.0;
 
 /** Gearbox and belt losses. */
 export const DRIVETRAIN_EFFICIENCY = 0.86;
+
+/**
+ * Watts the standard pack delivers before the voltage starts to sag.
+ *
+ * `MotorSpec.drawWatts` and `rotor.motorWatts` were both documented as the
+ * electrical load a part puts on the pack, and nothing anywhere read either of
+ * them — so the most powerful drive motor in the catalogue was free, and the
+ * Extended Battery bought a flat 28% on weapon spin-up and nothing else. Every
+ * real machine in this weight class is power-limited, and browning out because
+ * you asked for full drive while the weapon was still coming up to speed is one
+ * of the genuinely famous ways to lose a fight.
+ *
+ * 12 kW is a 12S pack at a burst current a heavyweight actually pulls — enough
+ * that a big spinner can spin up *or* the machine can drive hard, but not both
+ * at once with the thirstiest drive motor fitted.
+ */
+export const PACK_WATTS = 12_000;
+
+/** What the Extended Battery adds to that. */
+export const BIG_BATTERY_WATTS = 3_500;
+
+/** The pack never sags below this fraction: a brownout is not a dead machine. */
+export const MIN_PACK_SAG = 0.45;
+
+/**
+ * Joules a drive motor can absorb before it is too hot to make full torque.
+ *
+ * Copper and steel take about 450 J per kilogram per kelvin, and a motor is done
+ * at roughly 90 K over ambient — so a motor's heat budget is its own mass times
+ * about 40 kJ/kg. This is the constraint the catalogue was already *promising*
+ * and never implementing: the AF-550's blurb says it "cooks itself in a long push
+ * match" and nothing in the game could ever make that true.
+ *
+ * It is also the only axis on which a big slow motor beats a fast one. A shove is
+ * a stall, and in a stall both machines are traction-limited to exactly the same
+ * thrust — so the fast motor's extra shaft power buys nothing at all, and the
+ * only thing that separates them is which one is still making torque a minute
+ * later. That is the Ironhide's whole reason to exist, and its blurb has said so
+ * from the beginning: "Wins shoving matches, never wins races."
+ */
+export const MOTOR_HEAT_J_PER_KG = 40_000;
+
+/**
+ * Fraction of its heat budget a motor sheds per second.
+ *
+ * A 90-second thermal time constant, which is what a motor bolted inside a sealed
+ * armoured box with no airflow over it actually has — combat robots are not
+ * ventilated, that is the whole problem. It is also what decides whether the
+ * mechanic exists at all: the steady-state heat of a machine leaning on something
+ * is `draw / (capacity * this)`, so a faster constant simply meant nothing ever
+ * got hot enough to derate and the whole model was decorative.
+ */
+export const MOTOR_COOL_RATE = 1 / 90;
+
+/** Heat fraction at which torque starts falling off, and the floor it falls to. */
+export const MOTOR_DERATE_FROM = 0.75;
+export const MIN_THERMAL_DERATE = 0.35;
 
 export const ARMOR_THICKNESS_RANGE = { min: 3, max: 20 } as const;
 export const GEAR_RATIO_RANGE = { min: 6, max: 40 } as const;
@@ -96,6 +154,15 @@ export interface DerivedStats {
   overweightBy: number;
 
   cost: number;
+
+  /** Watts the pack delivers before it sags. */
+  packWatts: number;
+  /** Watts the drive motors pull at full torque, all wheels. */
+  driveDrawWatts: number;
+  /** Watts the weapon motor pulls at full load (spin-up, or a stalled actuator). */
+  weaponDrawWatts: number;
+  /** Joules the drive motors absorb before they start derating. */
+  driveThermalJoules: number;
 
   /** Joules of armour integrity across the whole shell. */
   armorHp: number;
@@ -175,6 +242,13 @@ export function computeStats(design: BotDesign): DerivedStats {
   const hasBigBattery = parts.accessories.includes('bigbattery');
   const electronicsMass = BASE_ELECTRONICS_KG;
 
+  // The electrical budget. Both draw figures were dead numbers in the catalogue
+  // until something read them; this is that something.
+  const packWatts = PACK_WATTS + (hasBigBattery ? BIG_BATTERY_WATTS : 0);
+  const driveDrawWatts = wheelCount * motor.drawWatts;
+  const driveThermalJoules = wheelCount * motor.mass * MOTOR_HEAT_J_PER_KG;
+  const weaponDraw = weaponDrawWatts(weapon);
+
   const totalMass =
     chassis.frameMass + armorMass + driveMass + weaponMass + accessoryMass + electronicsMass;
 
@@ -188,7 +262,7 @@ export function computeStats(design: BotDesign): DerivedStats {
 
   // Armour integrity: toughness is J per mm per m², and thicker plate is
   // disproportionately better because it spreads the load — hence the exponent.
-  const armorHp = platedArea * thicknessMm ** 1.15 * armor.toughness;
+  const armorHp = platedArea * thicknessMm ** 1.0 * armor.toughness;
   const ablativeBonus = parts.accessories.includes('ablative') ? 1.22 : 1;
   const frameHp = chassis.frameIntegrity;
 
@@ -252,6 +326,10 @@ export function computeStats(design: BotDesign): DerivedStats {
     parts,
     armorMass,
     armorThicknessMm: thicknessMm,
+    packWatts,
+    driveDrawWatts,
+    weaponDrawWatts: weaponDraw,
+    driveThermalJoules,
     driveMass,
     weaponMass,
     rotorMassKg: rotorKg,
@@ -309,6 +387,14 @@ export function validateDesign(design: BotDesign): ValidationIssue[] {
 
   if (!design.name.trim()) {
     issues.push({ level: 'error', message: 'Your bot needs a name.' });
+  }
+
+  const peakDraw = stats.driveDrawWatts + stats.weaponDrawWatts;
+  if (peakDraw > stats.packWatts) {
+    issues.push({
+      level: 'warning',
+      message: `Spinning up while driving hard pulls ${(peakDraw / 1000).toFixed(1)} kW from a ${(stats.packWatts / 1000).toFixed(1)} kW pack — the drive will sag. Fit a smaller drive motor or the Extended Battery.`,
+    });
   }
 
   if (weapon.kind === 'wedge' && stats.parts.accessories.includes('forks')) {

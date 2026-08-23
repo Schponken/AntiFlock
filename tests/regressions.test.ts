@@ -18,7 +18,10 @@ import {
   PRESETS,
   computeStats,
   makeDefaultDesign,
+  DRIVETRAIN_EFFICIENCY,
   GEAR_RATIO_RANGE,
+  MIN_THERMAL_DERATE,
+  MOTOR_DERATE_FROM,
   presetById,
   validateDesign,
   type BotDesign,
@@ -635,30 +638,220 @@ describe('damage accounting', () => {
 
   it('has no strictly dominant drive motor', () => {
     /*
-     * The gear slider spans 6:1 to 40:1 — a 6.7x range — so a faster motor can
-     * always be geared down onto a slower one\'s speed band, and a motor is only
-     * distinct if its *envelope* is. Comparing peak wheel torque and peak wheel
-     * speed across the whole slider range (and mass) is that envelope. The
-     * Ironhide 750 failed this: at 3100 rpm x 6.2 Nm its shaft power sat below the
-     * Vortex 63 while it weighed almost twice as much, so there was no build in
-     * which it was the right motor and the choice was decoration.
+     * The first version of this test scored motors on `stallTorque * 40` — peak
+     * wheel torque across the gear slider — and that is an axis the drivetrain
+     * throws away. `updateDrive` caps every wheel at `mu*m*g / wheelsDown`, and at
+     * any usable gear ratio every motor in the catalogue is already far past that
+     * cap: an Ironhide at 20:1 asks for 2218 N against a 319 N budget. So the test
+     * certified a difference the solver could not express, and the catalogue
+     * change made to satisfy it changed nothing about how a machine drives.
+     *
+     * What the solver actually reads is the motor *curve*: available force is
+     * `F0 * (1 - v/v_free)`, so two things separate motors — the speed they still
+     * pull at, and what they cost in amps and in heat to get it. Matching top
+     * speed by gearing (`g_H/g_I = 12800/3100`) leaves the Hyperion making 1.43x
+     * the Ironhide's force at lower mass, which is why torque and speed alone can
+     * never make the Ironhide a live choice. Power draw and heat can.
      */
-    const rows = DRIVE_MOTORS.map((motor) => ({
-      id: motor.id,
-      mass: motor.mass,
-      // Peak pushing torque at the wheel, and peak wheel speed, across the slider.
-      torque: motor.stallTorque * GEAR_RATIO_RANGE.max,
-      speed: motor.freeRpm / GEAR_RATIO_RANGE.min,
-    }));
+    const rows = DRIVE_MOTORS.map((motor) => {
+      const design = { ...makeDefaultDesign(), motorId: motor.id };
+      const stats = computeStats(design);
+      const wheelRadius = stats.parts.wheel.radius;
+      return {
+        id: motor.id,
+        mass: motor.mass,
+        // Fastest the machine can be geared to go, and the force it still makes
+        // at half that speed — the two ends of the curve the solver integrates.
+        topSpeed: ((motor.freeRpm / GEAR_RATIO_RANGE.min / 60) * 2 * Math.PI * wheelRadius),
+        forceAtCruise:
+          ((motor.stallTorque * GEAR_RATIO_RANGE.min * DRIVETRAIN_EFFICIENCY) / wheelRadius) * 0.5,
+        // Amps are a budget: what is left of the pack for the weapon.
+        packHeadroom: -stats.driveDrawWatts,
+        // And heat is the other one: how long it can sit in a shove at full stall
+        // before it starts derating, in seconds.
+        shoveSeconds: stats.driveThermalJoules / stats.driveDrawWatts,
+      };
+    });
+
     for (const a of rows) {
       const dominated = rows.filter(
-        (b) => b.id !== a.id && a.torque >= b.torque && a.speed >= b.speed && a.mass <= b.mass,
+        (b) =>
+          b.id !== a.id &&
+          a.topSpeed >= b.topSpeed &&
+          a.forceAtCruise >= b.forceAtCruise &&
+          a.packHeadroom >= b.packHeadroom &&
+          a.shoveSeconds >= b.shoveSeconds &&
+          a.mass <= b.mass,
       );
       expect(
         dominated.map((b) => b.id),
         `${a.id} is strictly better than ${dominated.map((b) => b.id).join(', ')}`,
       ).toEqual([]);
     }
+
+    // And the axis that saves the slow motor has to be a real spread, not a
+    // rounding difference: the Ironhide has to out-shove the Hyperion clearly.
+    const shove = (id: string): number => rows.find((r) => r.id === id)!.shoveSeconds;
+    expect(
+      shove('ironhide') / shove('hyperion'),
+      'the torque motor does not last meaningfully longer in a shove',
+    ).toBeGreaterThan(1.5);
+  });
+
+  it('makes the pack a budget the weapon and the drive have to share', () => {
+    /*
+     * `MotorSpec.drawWatts` and `rotor.motorWatts` were both documented as the
+     * load a part puts on the battery, and nothing read either — so the thirstiest
+     * drive motor in the catalogue was free to fit, and the Extended Battery
+     * bought a flat 28% on spin-up whatever else was drawing.
+     */
+    const withMotor = (motorId: string, weaponId: string, accessories: AccessoryEffect[] = []) =>
+      computeStats({ ...makeDefaultDesign(), motorId, weaponId, accessories });
+
+    const thirsty = withMotor('hyperion', 'vert-disc');
+    const frugal = withMotor('ironhide', 'vert-disc');
+    expect(thirsty.driveDrawWatts, 'the fast motor costs no more amps').toBeGreaterThan(
+      frugal.driveDrawWatts,
+    );
+    expect(thirsty.weaponDrawWatts, 'a spinner draws nothing from the pack').toBeGreaterThan(0);
+
+    // Spinning up while driving flat out has to be over budget for the thirsty
+    // build and inside it for the frugal one, or the choice is not a choice.
+    expect(
+      thirsty.driveDrawWatts + thirsty.weaponDrawWatts,
+      'the thirstiest build never troubles the pack',
+    ).toBeGreaterThan(thirsty.packWatts);
+
+    // And the Extended Battery has to buy real headroom, not a magic number.
+    const bigger = withMotor('hyperion', 'vert-disc', ['bigbattery']);
+    expect(bigger.packWatts, 'the Extended Battery adds no watts').toBeGreaterThan(
+      thirsty.packWatts,
+    );
+
+    // A wedge draws nothing; a crusher runs a pump and does. `closeTime` was
+    // otherwise a dead field on the clamp spec.
+    expect(computeStats({ ...makeDefaultDesign(), weaponId: 'wedge' }).weaponDrawWatts).toBe(0);
+    expect(
+      computeStats({ ...makeDefaultDesign(), weaponId: 'crusher' }).weaponDrawWatts,
+      'a hydraulic crusher draws nothing from the pack',
+    ).toBeGreaterThan(500);
+  });
+
+  it('heats the drive motors on load and cools them again', () => {
+    /*
+     * The AF-550's blurb has always said it "cooks itself in a long push match"
+     * and nothing in the game could make that true. Heat goes as current squared,
+     * and current is set by back-EMF — so a wheel held near zero speed at full
+     * throttle is the case that burns a motor, whatever the tyre can transmit.
+     *
+     * What is asserted here is the wiring and the direction, not a particular
+     * temperature: pinning a chassis still enough to hold a clean stall means
+     * fighting the vehicle controller every step, and a number measured against
+     * that fight would be pinning the harness rather than the model. The size of
+     * the effect is pinned from the catalogue in the motor-dominance test above,
+     * where it is exact.
+     */
+    const { world, bot } = solo({ ...presetById('doorstop').design, motorId: 'hyperion' });
+    run(world, 0.5);
+    expect(bot.motorTemp, 'the machine started the fight already hot').toBe(0);
+
+    drive(bot, 1);
+    run(world, 12);
+    const hot = bot.motorTemp;
+    expect(hot, 'driving did not warm the motors at all').toBeGreaterThan(0.01);
+
+    drive(bot, 0);
+    run(world, 40);
+    expect(bot.motorTemp, 'the motors never cooled off').toBeLessThan(hot);
+    world.free();
+  });
+
+  it('makes a cooked motor and a sagging pack actually slow the machine down', () => {
+    /*
+     * Heat and amps are only worth modelling if they reach the wheels. Deleting
+     * `* this.packSag * this.thermalDerate()` from the commanded force left every
+     * other test in this file green — the temperature still rose, the derate curve
+     * still returned the right number, and the machine drove exactly as fast as
+     * before. This is the test that fails when the multiplication goes away.
+     */
+    const distance = (bake: boolean): number => {
+      const { world, bot } = solo({ ...presetById('doorstop').design, motorId: 'hyperion' });
+      run(world, 1);
+      const inner = bot as unknown as { motorHeat: number };
+      const start = bot.position(new THREE.Vector3());
+      drive(bot, 1);
+      for (let i = 0; i < Math.round(2.5 / FIXED_DT); i++) {
+        // Hold it cooked: the thermal integrator would otherwise pull it back
+        // toward whatever this run's own duty cycle produces.
+        if (bake) inner.motorHeat = 1;
+        world.step();
+      }
+      const travelled = bot.position(new THREE.Vector3()).sub(start).length();
+      world.free();
+      return travelled;
+    };
+
+    const cold = distance(false);
+    const cooked = distance(true);
+    expect(cold, 'the cold machine never moved').toBeGreaterThan(0.5);
+    expect(cooked, 'a fully cooked motor drove just as far as a cold one').toBeLessThan(
+      cold * 0.92,
+    );
+
+    /*
+     * And the pack: the same machine, spinning up a big disc while driving flat
+     * out, against the same machine carrying the Extended Battery. The only
+     * difference between the two builds is watts.
+     */
+    const sprint = (accessories: AccessoryEffect[]): number => {
+      const design = {
+        ...presetById('doorstop').design,
+        motorId: 'hyperion',
+        weaponId: 'vert-disc',
+        accessories,
+      };
+      const { world, bot } = solo(design);
+      run(world, 1);
+      const start = bot.position(new THREE.Vector3());
+      // Weapon on *and* full throttle: the case the pack cannot cover.
+      bot.setInput({ throttle: 1, steer: 0, weapon: true, fire: false, selfRight: false });
+      run(world, 2.5);
+      const travelled = bot.position(new THREE.Vector3()).sub(start).length();
+      world.free();
+      return travelled;
+    };
+
+    const stock = sprint([]);
+    const bigPack = sprint(['bigbattery']);
+    expect(stock, 'the machine never moved').toBeGreaterThan(0.3);
+    expect(
+      bigPack,
+      'the Extended Battery bought nothing while the weapon was spinning up',
+    ).toBeGreaterThan(stock * 1.02);
+  });
+
+  it('derates a drive motor that has cooked, and never past the floor', () => {
+    // The derate curve itself, which is what the heat is *for*.
+    const { world, bot } = solo(presetById('doorstop').design);
+    run(world, 0.5);
+    const inner = bot as unknown as { motorHeat: number; thermalDerate(): number };
+
+    inner.motorHeat = 0;
+    expect(inner.thermalDerate(), 'a cold motor was already derated').toBe(1);
+    inner.motorHeat = MOTOR_DERATE_FROM;
+    expect(inner.thermalDerate(), 'derating started before the threshold').toBe(1);
+    inner.motorHeat = (MOTOR_DERATE_FROM + 1) / 2;
+    const half = inner.thermalDerate();
+    expect(half, 'a half-cooked motor was not derated').toBeLessThan(1);
+    expect(half).toBeGreaterThan(MIN_THERMAL_DERATE);
+    inner.motorHeat = 1;
+    expect(inner.thermalDerate(), 'a cooked motor did not reach the floor').toBeCloseTo(
+      MIN_THERMAL_DERATE,
+      6,
+    );
+    // A cooked motor is a slow machine, not a dead one.
+    expect(MIN_THERMAL_DERATE).toBeGreaterThan(0.2);
+    world.free();
   });
 
   it('has no strictly dominant wheel', () => {

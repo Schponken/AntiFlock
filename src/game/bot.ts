@@ -21,7 +21,13 @@ import { bodyGroups, weaponGroups } from '../physics/groups.ts';
 import { buildBotVisual, wedgeDimensions, type BotVisual } from '../render/botMesh.ts';
 import { BotDamage, type ArmorFace } from './damage.ts';
 import { computeStats, type BotDesign, type DerivedStats } from './design.ts';
-import { DRIVETRAIN_EFFICIENCY } from './design.ts';
+import {
+  DRIVETRAIN_EFFICIENCY,
+  MIN_PACK_SAG,
+  MIN_THERMAL_DERATE,
+  MOTOR_COOL_RATE,
+  MOTOR_DERATE_FROM,
+} from './design.ts';
 import {
   driveLayout,
   rotorInertiaTensor,
@@ -138,6 +144,23 @@ export class Bot {
   private actuatorShotsLeft: number;
   private actuatorTarget = 0;
   private srimechCooldown = 0;
+
+  /**
+   * How far the pack has sagged this step, 0.45-1.
+   *
+   * `MotorSpec.drawWatts` and `rotor.motorWatts` were both documented as the load
+   * a part puts on the battery and neither was read anywhere, so the thirstiest
+   * drive motor in the catalogue cost nothing to fit. Browning out because you
+   * asked for full drive while the weapon was still spinning up is one of the
+   * genuinely famous ways to lose a fight in this weight class, and it is the
+   * thing that makes a slow, cheap-on-amps motor a real choice.
+   */
+  private packSag = 1;
+
+  /** Mean fraction of stall torque the drive asked for last step. */
+  private driveLoad = 0;
+  /** 0-1: how much of its heat budget the drive has used. Drives `motorTemp`. */
+  private motorHeat = 0;
 
   /** Running match statistics, consumed by the judges. */
   aggression = 0;
@@ -587,7 +610,9 @@ export class Bot {
     this.approachVelocity.set(v.x, v.y, v.z);
 
     this.updateInversion();
+    this.updatePowerBudget();
     this.updateDrive();
+    this.updateThermal(dt);
     this.updateWeapon(dt);
     /*
      * The suspension rays must not be able to see this machine's own weapon.
@@ -749,6 +774,69 @@ export class Bot {
     }
   }
 
+  /**
+   * Voltage sag when the pack is asked for more than it has.
+   *
+   * A brushed or brushless motor's current — and so its electrical draw — is
+   * proportional to the torque it is making, so the drive's demand is its rated
+   * draw scaled by how much of stall torque it is actually asking for. A spinner
+   * pulls its full rated power while it is coming up to speed and almost nothing
+   * holding redline, which is why spinning up and driving hard at the same time
+   * is the case that browns a machine out.
+   *
+   * The drive's share is read from last step's load rather than this one's: the
+   * sag scales the force that sets the load, so taking it live would be circular.
+   * At 480 Hz a one-step lag is 2 ms.
+   */
+  /**
+   * How hot the drive motors are, 0 (cold) to 1 (derating hard).
+   *
+   * The HUD reads this: a mechanic the player cannot see is a mechanic that just
+   * feels like the machine randomly got worse.
+   */
+  get motorTemp(): number {
+    return clamp01(this.motorHeat);
+  }
+
+  /**
+   * Drive motors heat up on current and cool on time.
+   *
+   * Resistive heating goes as the square of the current, and current goes as
+   * torque — so a machine leaning on a wall at full stall cooks four times faster
+   * than one cruising at half torque. Cooling is Newtonian toward ambient.
+   */
+  private updateThermal(dt: number): void {
+    const capacity = Math.max(1, this.stats.driveThermalJoules);
+    const generated = this.stats.driveDrawWatts * this.driveLoad ** 2;
+    const shed = capacity * MOTOR_COOL_RATE * this.motorHeat;
+    this.motorHeat = clamp01(this.motorHeat + ((generated - shed) * dt) / capacity);
+  }
+
+  /** Torque still available given how hot the motors are. */
+  private thermalDerate(): number {
+    if (this.motorHeat <= MOTOR_DERATE_FROM) return 1;
+    const over = (this.motorHeat - MOTOR_DERATE_FROM) / (1 - MOTOR_DERATE_FROM);
+    return clamp(1 - over * (1 - MIN_THERMAL_DERATE), MIN_THERMAL_DERATE, 1);
+  }
+
+  private updatePowerBudget(): void {
+    const demandWatts =
+      this.stats.driveDrawWatts * this.driveLoad + this.stats.weaponDrawWatts * this.weaponLoad();
+    this.packSag =
+      demandWatts <= this.stats.packWatts
+        ? 1
+        : clamp(this.stats.packWatts / demandWatts, MIN_PACK_SAG, 1);
+  }
+
+  /** 0-1: how hard the weapon motor is working. Full while spinning up, ~0 at redline. */
+  private weaponLoad(): number {
+    if (!this.input.weapon || this.damage.weaponCondition <= 0.05) return 0;
+    const rotor = this.stats.parts.weapon.rotor;
+    if (!rotor) return 1;
+    const maxOmega = Math.min(rotor.maxOmega, MAX_SIMULABLE_OMEGA * 0.97);
+    return clamp01(1 - Math.abs(this._omega) / Math.max(1, maxOmega));
+  }
+
   private updateDrive(): void {
     const { motor, wheel } = this.stats.parts;
     const gearRatio = clamp(this.design.gearRatio, 6, 40);
@@ -840,6 +928,8 @@ export class Bot {
     for (let i = 0; i < this.wheelDead.length; i++) {
       if (!this.wheelDead[i] && this.vehicle.wheelIsInContact(i)) wheelsDown += 1;
     }
+    let loadSum = 0;
+    let loadWheels = 0;
     const tractionPerWheel =
       (wheel.grip * this.stats.totalMass * 9.81) / Math.max(1, wheelsDown);
 
@@ -867,10 +957,28 @@ export class Bot {
       const availableForce = perWheelForce * clamp(1 - ratio, 0, 1.35);
 
       // See `tractionPerWheel` above.
-      const commanded = Math.min(availableForce * mobility, tractionPerWheel);
+      const commanded = Math.min(
+        availableForce * mobility * this.packSag * this.thermalDerate(),
+        tractionPerWheel,
+      );
       this.vehicle.setWheelEngineForce(i, demand * commanded);
       this.vehicle.setWheelBrake(i, braking ? this.stats.totalMass * 1.4 : 0);
+      /*
+       * Current, not useful force.
+       *
+       * A motor's current is `(V - back-EMF) / R`: it is set by how fast the
+       * armature is turning, not by how much of the resulting torque the tyre can
+       * actually put into the floor. Scoring the load off the traction-capped
+       * force instead said a machine leaning on a wall at full throttle was
+       * running at 9% of stall and barely warm, when a stalled wheel is precisely
+       * the case that cooks a drive motor. This is the same `1 - v/v_free` term
+       * the available force is built from, which is the point: they are two
+       * consequences of the one motor curve.
+       */
+      loadSum += Math.abs(demand) * clamp(1 - ratio, 0, 1);
+      loadWheels += 1;
     }
+    this.driveLoad = loadWheels > 0 ? loadSum / loadWheels : 0;
 
     // Self-righting.
     if (this.input.selfRight && !this.prevSelfRight) this.trySelfRight();
@@ -941,7 +1049,10 @@ export class Bot {
       // Never ask for more spin than the integrator can represent; above the
       // ceiling the body silently saturates and the motor fights a wall.
       const maxOmega = Math.min(weapon.rotor.maxOmega, MAX_SIMULABLE_OMEGA * 0.97);
-      const power = weapon.rotor.motorWatts * (this.stats.parts.accessories.includes('bigbattery') ? 1.28 : 1);
+      // The pack is shared: a machine driving flat out has less of it left for
+      // the rotor. The Extended Battery's bonus is now its extra watts in
+      // `packWatts`, not a flat multiplier that applied whatever else was drawing.
+      const power = weapon.rotor.motorWatts * this.packSag;
       // Model a real motor curve: torque falls linearly from stall to free speed.
       // Choosing the damping factor this way makes peak power land where it should.
       const factor = (4 * power) / (maxOmega * maxOmega);
